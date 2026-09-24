@@ -32,9 +32,10 @@
 
 ## Двусторонний мониторинг (охрана охранников)
 
-- Схема: обе инстансы (home + VPS) пускают `heartbeat.check.sh` (touch файла каждую минуту), каждая следит за heartbeat другой по ssh (`guard-vps.check.sh` локально, `guard-home.check.sh` на VPS) — файл протух > 5m → другая сторона мертва → алерт в общий ТГ-чат
-- Окно протухания >> период heartbeat, `flake: 2m` гасит сетевые моргания, `report_restored: false` чтобы не спамить восстановлением после долгого даунтайма
-- Примеры в `examples/checks/`; ssh-алиасы `vps`/`home` в `~/.ssh/config` на обеих сторонах
+- Две проверки, по одной на машину (`examples/checks/mutual-*`), обе двунаправленные: тачим флаг для чужой стороны + проверяем свежесть флага, который чуже пушит к нам
+- `mutual-guard-home` (дома): `ssh vps touch .../heartbeat-home` (наш пульс) + `ssh vps find .../heartbeat -mmin -5` (пульс VPS; протух = VPS-демон мёртв, ssh упал = VPS недоступен целиком)
+- `mutual-guard-vps` (на VPS, в контейнере): локальный `touch /app/state/heartbeat` + `find /app/state/heartbeat-home -mmin -5` (пульс дома; протух = home daemon/machine down). SSH на VPS-стороне не нужен вообще
+- Окно протухания 5m >> пульс 1m, `flake: 2m`, `report_restored: false`, причина в алерте через `$stdout`/`$stderr`
 
 ## Деплой на VPS (docker)
 

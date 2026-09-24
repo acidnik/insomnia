@@ -200,34 +200,34 @@ Drop new checks into `~/insomnia/checks` on the VPS — the daemon picks them up
 
 ## Mutual monitoring — who guards the guards
 
-Two insomnia instances — one at home, one on the VPS — watch each other, so a dead daemon or a dead machine still triggers an alert from the surviving side:
+Two insomnia instances — one at home, one on the VPS — watch each other, so a dead daemon or a dead machine still triggers an alert from the surviving side. The whole scheme is **two checks**, one per machine: each side touches a heartbeat flag for the other and checks the flag it receives. Flags are plain files; freshness = mtime age:
 
 ```text
-home (insomnia) ── ssh ──> VPS (insomnia)
-       ▲                        │
-       └──────── ssh ───────────┘
+home (insomnia)                              VPS (insomnia)
+  mutual-guard-home:
+    ssh vps touch .../heartbeat-home  ──────▶  (our pulse, read by the VPS)
+    ssh vps find .../heartbeat -mmin  ◀──────  (vps pulse → stale = vps daemon dead)
+                                               ssh fails → whole vps unreachable
+  mutual-guard-vps:
+    touch /app/state/heartbeat         ◀─────  (vps pulse, read by home over ssh)
+    find /app/state/heartbeat-home     ──────▶  (home pulse → stale = home daemon down)
 
-both alerts land in the same Telegram chat:
-  home dies   → VPS instance notices the stale heartbeat and alerts
-  VPS dies    → home instance notices the stale heartbeat and alerts
+all alerts land in the same Telegram chat:
+  home daemon/machine dies → stops pushing → VPS sees stale flag, alerts
+  VPS daemon dies  → its flag goes stale → home sees it, alerts
+  VPS unreachable  → home's ssh fails → home alerts with "vps unreachable"
 ```
 
-The setup is three plain checks (see `examples/checks/`):
-
-1. **`heartbeat.check.sh`** — runs on BOTH machines. Touches a timestamp file every minute. This is the "I'm alive" signal of each instance.
-2. **`guard-vps.check.sh`** — runs at home. ssh'es to the VPS and checks that its heartbeat file was modified within the last 5 minutes; if not — the VPS daemon (or the whole VPS) is down.
-3. **`guard-home.check.sh`** — runs on the VPS. Same, but watches the home machine's heartbeat. This is the side that still fires when your home machine or home internet is down.
+The message of each failed check names the exact problem (`$stdout`/`$stderr` carry the reason): `vps unreachable: cannot update heartbeat flag` vs `vps insomnia is not heartbeating (daemon down, machine reachable)` vs `home is not heartbeating (home daemon or machine down)`.
 
 Why the parameters look the way they do:
 
 - The staleness window (5m) is several times the heartbeat period (1m) — a single missed beat or a network blip must not false-alarm.
 - `# flake: 2m` absorbs short ssh/network hiccups before alerting.
 - `# report_restored: false` — a machine coming back after hours of downtime would otherwise spam a recovery message for an alert you already dealt with.
-- `# timeout: 30s` — ssh can hang; the check must not.
+- `# timeout: 30s` on the home side (two ssh calls), 5s on the VPS side (local `find` only).
 
-Requirements: ssh key auth between the machines in both directions, and the aliases (`vps`, `home`) defined in each side's `~/.ssh/config`.
-
-Docker nuance: on the VPS the daemon runs in a container, so its heartbeat check touches `/app/state/heartbeat` (container path). That is the same file as `~/insomnia/state/heartbeat` on the VPS host — the home-side guard reads it via the host path over ssh. The VPS-side guard (`guard-home`) runs inside the container too, so uncomment the ssh key/known_hosts mounts in `deploy/docker-compose.vps.yml`.
+Requirements: ssh key auth home → VPS (alias `vps` in `~/.ssh/config`); the VPS-side check runs inside the insomnia container and needs no ssh at all.
 
 ## Building
 
