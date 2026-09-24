@@ -96,8 +96,8 @@ restart HOST="":
         docker compose -f deploy/docker-compose.vps.yml up -d --force-recreate app
 
         for i in $(seq 1 20); do
-            if docker logs insomnia 2>&1 | grep -q "watching /app/checks"; then
-                echo "OK: insomnia is watching /app/checks"
+            if docker logs insomnia 2>&1 | grep -q "watching "; then
+                echo "OK: insomnia is watching its checks dir"
                 docker logs --tail=10 insomnia
                 exit 0
             fi

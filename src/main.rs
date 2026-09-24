@@ -27,8 +27,16 @@ async fn main() -> Result<()> {
     let mut cfg = config::Config::load(config_path.as_ref())?;
     cfg.expanded();
 
-    std::fs::create_dir_all(&cfg.checks_dir)
-        .with_context(|| format!("cannot create checks dir {}", cfg.checks_dir.display()))?;
+    if !cfg.checks_dir.is_dir() {
+        // creating it silently would hide a misconfigured path (e.g. a host
+        // path inside a container) — the daemon would watch an empty dir
+        std::fs::create_dir_all(&cfg.checks_dir)
+            .with_context(|| format!("cannot create checks dir {}", cfg.checks_dir.display()))?;
+        tracing::warn!(
+            "checks dir {} did not exist and was created — check your config",
+            cfg.checks_dir.display()
+        );
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
 
