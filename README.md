@@ -198,6 +198,37 @@ just restart root@server.com    # restart container only
 
 Drop new checks into `~/insomnia/checks` on the VPS — the daemon picks them up via inotify, no redeploy needed.
 
+## Mutual monitoring — who guards the guards
+
+Two insomnia instances — one at home, one on the VPS — watch each other, so a dead daemon or a dead machine still triggers an alert from the surviving side:
+
+```text
+home (insomnia) ── ssh ──> VPS (insomnia)
+       ▲                        │
+       └──────── ssh ───────────┘
+
+both alerts land in the same Telegram chat:
+  home dies   → VPS instance notices the stale heartbeat and alerts
+  VPS dies    → home instance notices the stale heartbeat and alerts
+```
+
+The setup is three plain checks (see `examples/checks/`):
+
+1. **`heartbeat.check.sh`** — runs on BOTH machines. Touches a timestamp file every minute. This is the "I'm alive" signal of each instance.
+2. **`guard-vps.check.sh`** — runs at home. ssh'es to the VPS and checks that its heartbeat file was modified within the last 5 minutes; if not — the VPS daemon (or the whole VPS) is down.
+3. **`guard-home.check.sh`** — runs on the VPS. Same, but watches the home machine's heartbeat. This is the side that still fires when your home machine or home internet is down.
+
+Why the parameters look the way they do:
+
+- The staleness window (5m) is several times the heartbeat period (1m) — a single missed beat or a network blip must not false-alarm.
+- `# flake: 2m` absorbs short ssh/network hiccups before alerting.
+- `# report_restored: false` — a machine coming back after hours of downtime would otherwise spam a recovery message for an alert you already dealt with.
+- `# timeout: 30s` — ssh can hang; the check must not.
+
+Requirements: ssh key auth between the machines in both directions, and the aliases (`vps`, `home`) defined in each side's `~/.ssh/config`.
+
+Docker nuance: on the VPS the daemon runs in a container, so its heartbeat check touches `/app/state/heartbeat` (container path). That is the same file as `~/insomnia/state/heartbeat` on the VPS host — the home-side guard reads it via the host path over ssh. The VPS-side guard (`guard-home`) runs inside the container too, so uncomment the ssh key/known_hosts mounts in `deploy/docker-compose.vps.yml`.
+
 ## Building
 
 ```sh
