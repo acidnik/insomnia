@@ -1,0 +1,22 @@
+# config for the insomnia container on the VPS.
+# Host-side file: ~/insomnia/config.toml (mounted read-only into the
+# container at /app/config.toml by deploy/docker-compose.vps.yml).
+#
+# IMPORTANT: paths here are container paths — the host files/dirs are
+# bind-mounted onto them:
+#   /app/config.toml  <- ~/insomnia/config.toml
+#   /app/checks       <- ~/insomnia/checks
+#   /app/state        <- ~/insomnia/state
+# libexec comes baked into the image (libexec/ in the repo).
+
+checks_dir = "/app/checks"
+state_dir = "/app/state"
+libexec_dir = "/app/libexec"
+
+[telegram]
+bot_token = "..."
+chat_id = "..."
+
+[defaults]
+period = "5m"
+timeout = "60s"

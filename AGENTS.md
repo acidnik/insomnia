@@ -31,6 +31,13 @@
 - взаимный мониторинг охранников (touch на сервере — пишется как обычная проверка с `# message`)
 - jitter, дашборд/статистика
 
+## Деплой на VPS (docker)
+
+- `just deploy root@host` — push, локальная сборка release-бинарника, rsync на VPS, сборка образа из готового бинаря, рестарт контейнера. VPS-половина рецептов (`build-vps`/`restart` без HOST) вызывается по ssh
+- `deploy/Dockerfile.deploy` — debian-slim + python3/openssh/ca-certs; бинарь и `libexec/` запекаются в образ
+- `deploy/docker-compose.vps.yml` — конфиг/checks/state маунтятся с хоста (`~/insomnia/...` → `/app/...`), проект назван `insomnia` (не "deploy", иначе коллизия с другими стеками на VPS)
+- VPS-конфиг обязан использовать контейнерные пути: см. `deploy/config.vps.example.toml`
+
 ## libexec-тулзы
 
 - `libexec/parse_df` — python, читает `df -h` из stdin; пороги в env: `dev` (glob-маски), `free_percent` (дефолт 10), `free_gb` (дефолт 0 = выкл); псевдо-ФС (tmpfs/overlay/...) пропускает всегда

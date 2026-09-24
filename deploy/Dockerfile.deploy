@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+#
+# Minimal runtime image for insomnia on the VPS.
+# The pre-compiled `insomnia` binary must be in the build context
+# (compiled locally, rsynced by `just build-vps` — the VPS has no Rust).
+#
+# Usage (on VPS, automated by `just build-vps`):
+#   CTX=/tmp/insomnia-deploy-ctx
+#   cp /tmp/insomnia-bin $CTX/insomnia
+#   cp deploy/Dockerfile.deploy $CTX/
+#   cp -r libexec $CTX/
+#   cd $CTX && docker build -t localhost/insomnia -f Dockerfile.deploy .
+#
+# config.toml is NOT baked into the image — it is bind-mounted by compose
+# (deploy/docker-compose.vps.yml) from ~/insomnia/config.toml.
+
+FROM debian:bookworm-slim
+
+# python3 — libexec helpers (parse_df, parse_curl) are invoked by checks
+# openssh-client — ssh-based checks (`ssh host 'df -h' | parse_df`)
+# ca-certificates — Telegram API is https
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 openssh-client ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY insomnia /usr/local/bin/insomnia
+COPY libexec /app/libexec
+
+ENV RUST_LOG=info
+CMD ["/usr/local/bin/insomnia"]

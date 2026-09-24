@@ -174,6 +174,30 @@ loginctl enable-linger                  # keep it running after logout (needed o
 
 The unit expects the config at the default location (`~/.config/insomnia/config.toml`).
 
+## Deploying to a VPS (docker)
+
+The binary is compiled locally (the VPS doesn't need a Rust toolchain), rsynced over, and baked into a minimal runtime image on the VPS.
+
+One-time setup on the VPS:
+
+```sh
+git clone https://github.com/acidnik/insomnia ~/insomnia
+mkdir -p ~/insomnia/checks ~/insomnia/state
+cp deploy/config.vps.example.toml ~/insomnia/config.toml   # then fill in secrets
+```
+
+The VPS config must use the container paths (`/app/checks`, `/app/state`, `/app/libexec`) — see `deploy/config.vps.example.toml`. Config, checks and state are bind-mounted from `~/insomnia`; `libexec/` is baked into the image.
+
+Then from the repo, from anywhere:
+
+```sh
+just deploy root@server.com   # push → build locally → rsync → build image → restart
+just build-vps root@server.com  # rebuild image only
+just restart root@server.com    # restart container only
+```
+
+Drop new checks into `~/insomnia/checks` on the VPS — the daemon picks them up via inotify, no redeploy needed.
+
 ## Building
 
 ```sh

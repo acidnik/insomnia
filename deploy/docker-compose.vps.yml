@@ -1,0 +1,30 @@
+# VPS-only stack for the insomnia daemon.
+#
+#   docker compose -f deploy/docker-compose.vps.yml up -d app
+#
+# The image localhost/insomnia is built on the VPS from the locally compiled
+# binary + config (see deploy/Dockerfile.deploy, `just build-vps`).
+#
+# Paths inside the container are fixed: config at /app/config.toml, checks in
+# /app/checks, state in /app/state — the host-side files/dirs are bind-mounted
+# onto them, so the VPS config.toml must use the /app/... paths (see
+# deploy/config.vps.example.toml). State survives container recreation.
+
+# explicit project name — a compose project named after the directory
+# ("deploy") collides with other stacks on the same VPS
+name: insomnia
+
+services:
+  app:
+    image: localhost/insomnia
+    container_name: insomnia
+    restart: unless-stopped
+    environment:
+      - INSOMNIA_CONFIG=/app/config.toml
+    volumes:
+      - /root/insomnia/config.toml:/app/config.toml:ro
+      - /root/insomnia/checks:/app/checks
+      - /root/insomnia/state:/app/state
+      # for ssh-based checks: ssh key + known_hosts (read-only)
+      # - /root/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      # - /root/.ssh/known_hosts:/root/.ssh/known_hosts:ro
