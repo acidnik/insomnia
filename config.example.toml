@@ -1,0 +1,16 @@
+# insomnia daemon config
+# default path: ~/.config/insomnia/config.toml (override: INSOMNIA_CONFIG env or argv[1])
+
+checks_dir = "~/.config/insomnia/checks"
+state_dir = "~/.local/state/insomnia"
+# helper tools (parse_df, parse_curl, ...) prepended to PATH of every check
+# libexec_dir = "~/src/insomnia/libexec"
+
+[telegram]
+bot_token = "123456:ABC..."   # or INSOMNIA_TG_TOKEN env
+chat_id = "123456789"
+
+[defaults]
+period = "5m"     # default # period for checks without one
+timeout = "60s"   # default # timeout
+recheck = "1m"    # re-check interval while an alert is active
