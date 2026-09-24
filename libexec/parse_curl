@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""parse_curl — trigger on HTTP error codes, reading curl output from stdin.
+
+Usage in a check:
+    curl -sS -o /dev/null -w '%{http_code}' https://site.com/api/health | parse_curl
+
+Environment (set via `# var: key=value` in the check header):
+    ignore_codes  comma-separated HTTP codes to treat as OK (e.g. "503,502").
+                  Default: empty
+
+Triggers (exit 1, prints a message) when:
+  - stdin has no HTTP code at all (curl itself died: DNS, timeout, TLS, ...)
+  - the code is >= 400 and not listed in ignore_codes
+Otherwise exits 0.
+"""
+
+import os
+import sys
+
+
+def main() -> int:
+    ignore = {c.strip() for c in os.environ.get("ignore_codes", "").split(",") if c.strip()}
+
+    raw = sys.stdin.read().strip()
+    # take the last whitespace-separated token — tolerates extra -w output
+    code = raw.split()[-1] if raw else ""
+
+    if not code.isdigit():
+        print(f"curl failed: no http code in output{': ' + raw[:200] if raw else ' (empty)'}")
+        return 1
+
+    if code in ignore:
+        return 0
+
+    if int(code) >= 400:
+        print(f"HTTP {code}")
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

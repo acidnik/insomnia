@@ -4,7 +4,7 @@
 checks_dir = "~/.config/insomnia/checks"
 state_dir = "~/.local/state/insomnia"
 # helper tools (parse_df, parse_curl, ...) prepended to PATH of every check
-# libexec_dir = "~/src/insomnia/libexec"
+libexec_dir = "~/src/insomnia/libexec"
 
 [telegram]
 bot_token = "123456:ABC..."   # or INSOMNIA_TG_TOKEN env

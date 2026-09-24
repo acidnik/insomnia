@@ -101,10 +101,11 @@ An API check — minimal body, all the tuning in the header:
 # timeout: 15s
 # flake: 1m
 # repeat: 30m, 1h, 6h
+# var: ignore_codes=503
 # message: API health failed (exit=$exitcode)
 # $stderr
 
-curl -fsS https://site.com/api/health
+curl -sS -o /dev/null -w '%{http_code}' https://site.com/api/health | parse_curl
 ```
 
 The simplest possible check — just an exit code:
@@ -130,8 +131,55 @@ State (active alert, escalation index, counters) is persisted per check, so a da
 
 Metadata is any line matching `#\s+(\w+): (.*)`. Known keys are consumed, unknown keys are ignored, so other tooling can keep its own `# key: value` headers in the same files. Checks must be executable (`chmod +x`); hidden files, `*.tmp` and editor backups (`*~`) are skipped.
 
+## Helper tools (libexec)
+
+If `libexec_dir` is set in the config, it is prepended to `PATH` of every check. Helper tools parse command output and turn it into an exit code, so checks stay one-liners. They read their thresholds from environment variables set with `# var: key=value`.
+
+### parse_df — low disk space
+
+Reads `df -h` output from stdin. Triggers (exit 1) when available space is below the threshold:
+
+```bash
+#!/usr/bin/env bash
+# var: dev=/dev/nvme*,/dev/sd*   # glob masks for device or mount point (empty = all real fs)
+# var: free_percent=10           # alert when free space < 10% (default: 10)
+# var: free_gb=10                # ... or free space < 10 GB (default: 0 = disabled)
+
+ssh myserver 'df -h' | parse_df
+```
+
+Alert line: `disk low: / (/dev/sda1): 4.2G free (4%)`.
+
+### parse_curl — HTTP health
+
+Reads the HTTP status code from stdin. Triggers when curl died (no code on stdin) or the code is >= 400:
+
+```bash
+#!/usr/bin/env bash
+# var: ignore_codes=503,502      # codes to treat as OK (default: none)
+
+curl -sS -o /dev/null -w '%{http_code}' https://site.com/api/health | parse_curl
+```
+
+## Running as a systemd user service
+
+```sh
+cargo install --path .                  # installs to ~/.cargo/bin/insomnia
+mkdir -p ~/.config/systemd/user
+cp insomnia.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now insomnia
+loginctl enable-linger                  # keep it running after logout (needed on servers)
+```
+
+The unit expects the config at the default location (`~/.config/insomnia/config.toml`).
+
 ## Building
 
 ```sh
 cargo build --release
 ```
+
+## For LLM agents
+
+`examples/skill/SKILL.md` is a ready-made agent skill: point your coding agent at it and "create monitoring for X" becomes a one-liner — it knows the check patterns, where the real file lives, and where to symlink it.

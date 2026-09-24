@@ -400,7 +400,8 @@ fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
             let mut msg = format!("🔴 {id}: check failed (exit={exitcode})");
             if !stderr.is_empty() {
                 msg.push_str(&format!("\n{stderr}"));
-            } else if !stdout.is_empty() {
+            }
+            if !stdout.is_empty() {
                 msg.push_str(&format!("\n{stdout}"));
             }
             msg

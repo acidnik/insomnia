@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""parse_df — trigger on low disk space, reading `df -h` output from stdin.
+
+Usage in a check:
+    ssh myserver 'df -h' | parse_df
+
+Environment (set via `# var: key=value` in the check header):
+    dev           comma-separated glob masks for device names or mount points
+                  (fnmatch-style, e.g. "/dev/nvme*,/dev/sd*"). Empty = all real
+                  filesystems (tmpfs/devtmpfs/overlay/... are skipped anyway).
+    free_percent  alert when available space falls below this percent. Default: 10
+    free_gb       alert when available space falls below this many GB.
+                  Default: 0 (disabled)
+
+On trigger prints a human-readable alert line per filesystem and exits 1,
+otherwise exits 0.
+"""
+
+import fnmatch
+import os
+import re
+import sys
+
+# pseudo filesystems never worth alerting on
+SKIP_FS = {"tmpfs", "devtmpfs", "udev", "overlay", "squashfs", "efivarfs", "ramfs"}
+
+MULT = {"B": 1, "K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40, "P": 2**50}
+
+
+def to_bytes(s: str) -> float:
+    m = re.match(r"^([\d.]+)([BKMGTP]?)$", s)
+    if not m:
+        return 0.0
+    return float(m.group(1)) * MULT.get(m.group(2), 1)
+
+
+def main() -> int:
+    dev_masks = [m for m in os.environ.get("dev", "").split(",") if m]
+    free_percent = float(os.environ.get("free_percent", "10"))
+    free_gb = float(os.environ.get("free_gb", "0"))
+
+    lines = sys.stdin.read().splitlines()
+    if not lines or not lines[0].startswith("Filesystem"):
+        print("parse_df: no df output on stdin", file=sys.stderr)
+        return 1
+
+    alerts = []
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        fs, size, _used, avail, use_pct, mount = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
+
+        if fs.startswith("Filesystem") or any(fs.startswith(p) for p in SKIP_FS):
+            continue
+        if dev_masks and not any(
+            fnmatch.fnmatch(fs, m) or fnmatch.fnmatch(mount, m) for m in dev_masks
+        ):
+            continue
+
+        avail_bytes = to_bytes(avail)
+        avail_gb = avail_bytes / MULT["G"]
+        # use% is used space; available percent = 100 - used (rounded like df does)
+        try:
+            avail_pct = 100 - int(use_pct.rstrip("%"))
+        except ValueError:
+            avail_pct = 100
+
+        if avail_pct < free_percent or (free_gb > 0 and avail_gb < free_gb):
+            alerts.append(f"{mount} ({fs}): {avail} free ({avail_pct}%)")
+
+    if alerts:
+        print("disk low: " + "; ".join(alerts))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

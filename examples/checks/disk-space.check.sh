@@ -2,8 +2,7 @@
 # tags: disk
 # period: 1h
 # var: dev=/dev/nvme*,/dev/sd*
-# var: free_percent=5
+# var: free_percent=10
 # var: free_gb=10
 
-# TODO: parse_df helper from libexec
-ssh myserver 'df -h'
+ssh myserver 'df -h' | parse_df

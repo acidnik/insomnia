@@ -28,14 +28,20 @@
 
 ## Что ещё не сделано (roadmap)
 
-- libexec-парсеры (`parse_df`, `parse_curl`, ...) — `libexec_dir` уже добавляется в PATH проверок
 - взаимный мониторинг охранников (touch на сервере — пишется как обычная проверка с `# message`)
-- systemd-юнит, jitter, дашборд/статистика
+- jitter, дашборд/статистика
+
+## libexec-тулзы
+
+- `libexec/parse_df` — python, читает `df -h` из stdin; пороги в env: `dev` (glob-маски), `free_percent` (дефолт 10), `free_gb` (дефолт 0 = выкл); псевдо-ФС (tmpfs/overlay/...) пропускает всегда
+- `libexec/parse_curl` — python, читает http code из stdin; триггер: кода нет (curl упал) или код >= 400 и не в `ignore_codes`
+- тулзы печатают причину в stdout — дефолтный message демона включает stdout и stderr
 
 ## Проверка изменений
 
 - `cargo build` — 0 warnings
 - `cargo test` — 4 теста мета-парсера и durations
+- парсеры: пайпы в `libexec/*` тестируются напрямую, см. примеры в их docstrings
 - smoke: `mkdir -p tmp/checks tmp/state`, конфиг в `tmp/config.toml` (см. tmp/), `RUST_LOG=info timeout 5 cargo run -q -- tmp/config.toml`; hot-reload проверяется созданием/удалением файла в `tmp/checks` на работающем демоне
 
 ## Конвенции кода

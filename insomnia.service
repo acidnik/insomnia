@@ -1,0 +1,12 @@
+[Unit]
+Description=insomnia — file-based monitoring daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.cargo/bin/insomnia
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

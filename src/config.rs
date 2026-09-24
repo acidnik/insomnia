@@ -46,7 +46,22 @@ impl Config {
             .with_context(|| format!("cannot read config {}", path.display()))?;
         let cfg: Config = toml::from_str(&raw)
             .with_context(|| format!("cannot parse config {}", path.display()))?;
+        let cfg = Self::apply_env(cfg);
         Ok(cfg)
+    }
+
+    /// allow secrets via env: INSOMNIA_TG_TOKEN overrides/creates [telegram].bot_token
+    fn apply_env(mut cfg: Config) -> Config {
+        if let Ok(token) = std::env::var("INSOMNIA_TG_TOKEN") {
+            if !token.is_empty() {
+                let tg = cfg.telegram.get_or_insert_with(|| TelegramConfig {
+                    bot_token: String::new(),
+                    chat_id: String::new(),
+                });
+                tg.bot_token = token;
+            }
+        }
+        cfg
     }
 
     pub fn state_dir(&self) -> PathBuf {
