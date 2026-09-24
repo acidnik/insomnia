@@ -1,15 +1,16 @@
 REPO_DIR := justfile_directory()
-BIN := REPO_DIR / "target/release/insomnia"
+LOCAL_BIN := "/tmp/insomnia-out/insomnia"
 
 _default:
     @just --list
 
-# ─── Deploy (local binary + VPS image build) ────────────────────────────────
+# ─── Deploy (docker build + local binary + VPS image build) ─────────────
 #
 # build-vps / restart are dual-side recipes:
 #
-#   with HOST              → local driver: compile release binary, rsync it,
-#                            then run the VPS half over ssh
+#   with HOST              → local driver: compile release binary in docker
+#                            (rust:1-bookworm — same glibc as the runtime
+#                            image), rsync it, then run the VPS half over ssh
 #   without HOST (on VPS)  → the VPS half that does the actual work
 #
 #   just deploy root@server.com
@@ -37,12 +38,20 @@ build-vps HOST="": _check-git-clean
     set -euo pipefail
 
     if [ -n "{{HOST}}" ]; then
-        echo "--- Building insomnia release locally..."
-        cd {{REPO_DIR}} && cargo build --release
-        test -f {{BIN}} || { echo "no binary at {{BIN}}"; exit 1; }
+        echo "--- Building insomnia release in docker (rust:1-bookworm)..."
+        # compile via deploy/Dockerfile.build: a bookworm-based builder, so
+        # glibc matches the runtime image (debian:bookworm-slim) — a binary
+        # built on the host (e.g. Arch) may not run on the VPS. Cargo caches
+        # live in BuildKit cache mounts: incremental, no host pollution.
+        # The result lands in /tmp/insomnia-out/, no image is kept.
+        cd {{REPO_DIR}} && docker build \
+            -f deploy/Dockerfile.build \
+            --output type=local,dest=/tmp/insomnia-out \
+            .
+        test -f {{LOCAL_BIN}} || { echo "no binary at {{LOCAL_BIN}}"; exit 1; }
 
         echo "--- Copying binary to {{HOST}}..."
-        rsync -az -e ssh "{{BIN}}" "{{HOST}}:/tmp/insomnia-bin"
+        rsync -az -e ssh "{{LOCAL_BIN}}" "{{HOST}}:/tmp/insomnia-bin"
 
         # Pull the just-pushed code first so the invoked recipe is the fresh one.
         echo "--- Syncing code to {{HOST}}..."

@@ -1,0 +1,9 @@
+# build context for deploy/Dockerfile.build (repo root) — keep it small
+.git
+target
+tmp
+checks
+state
+config.toml
+examples
+docs

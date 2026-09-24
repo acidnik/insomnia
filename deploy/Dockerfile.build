@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.7
+#
+# Builder image: compiles the release binary on bookworm so its glibc
+# matches the runtime image (debian:bookworm-slim). The binary is exported
+# with `--output` — no image is kept from this build.
+#
+#   docker build -f deploy/Dockerfile.build \
+#       --output type=local,dest=/tmp/insomnia-out .
+#
+# Cargo registry and build artifacts live in BuildKit cache mounts:
+# they persist between builds (incremental), don't pollute the host and
+# aren't part of any image layer.
+
+FROM rust:1-bookworm AS build
+WORKDIR /build
+# keep build artifacts on the cache mount, not in the image layer
+ENV CARGO_TARGET_DIR=/target
+
+# compile dependencies first: this layer stays cached while only the code
+# changes (standard Cargo.toml/lock + dummy main trick)
+COPY Cargo.toml Cargo.lock ./
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/target \
+    mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release
+
+# now the real build (cache mounts vanish after the RUN — copy the binary
+# out to a regular path within the same RUN)
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/target \
+    cargo build --release \
+    && cp /target/release/insomnia /build/insomnia
+
+# --output type=local exports the ENTIRE filesystem of the last stage,
+# so the export stage holds only the binary
+FROM scratch AS export
+COPY --from=build /build/insomnia /insomnia

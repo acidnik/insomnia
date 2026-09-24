@@ -176,7 +176,7 @@ The unit expects the config at the default location (`~/.config/insomnia/config.
 
 ## Deploying to a VPS (docker)
 
-The binary is compiled locally (the VPS doesn't need a Rust toolchain), rsynced over, and baked into a minimal runtime image on the VPS.
+The binary is compiled in docker on the local machine (`rust:1-bookworm` — its glibc matches the `debian:bookworm-slim` runtime image; building natively on the host would produce a binary the VPS may not run), rsynced over, and baked into a minimal runtime image on the VPS. The VPS doesn't need a Rust toolchain, the local machine only needs docker.
 
 One-time setup on the VPS:
 

@@ -38,7 +38,7 @@
 
 ## Деплой на VPS (docker)
 
-- `just deploy root@host` — push, локальная сборка release-бинарника, rsync на VPS, сборка образа из готового бинаря, рестарт контейнера. VPS-половина рецептов (`build-vps`/`restart` без HOST) вызывается по ssh
+- `just deploy root@host` — push, сборка release-бинарника **в докере** (`deploy/Dockerfile.build`: builder на `rust:1-bookworm` — glibc совпадает с runtime-образом `debian:bookworm-slim`; нативная сборка на Arch дала бы несовместимый бинарь; крейты/артефакты в BuildKit cache-mounts, экспорт бинаря через `FROM scratch` + `--output`), rsync на VPS, сборка образа из готового бинаря, рестарт контейнера. VPS-половина рецептов (`build-vps`/`restart` без HOST) вызывается по ssh
 - `deploy/Dockerfile.deploy` — debian-slim + python3/openssh/ca-certs; бинарь и `libexec/` запекаются в образ
 - `deploy/docker-compose.vps.yml` — конфиг/checks/state маунтятся с хоста (`~/insomnia/...` → `/app/...`), проект назван `insomnia` (не "deploy", иначе коллизия с другими стеками на VPS)
 - VPS-конфиг обязан использовать контейнерные пути: см. `deploy/config.vps.example.toml`
