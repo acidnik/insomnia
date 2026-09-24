@@ -326,6 +326,15 @@ impl Engine {
         check.running_gen = None;
 
         let ok = outcome.ok();
+        tracing::debug!(
+            "check {id} finished in {:?}: code={:?} timed_out={} \
+             stdout={} stderr={}",
+            outcome.duration,
+            outcome.code,
+            outcome.timed_out,
+            tail(&outcome.stdout, 300),
+            tail(&outcome.stderr, 300),
+        );
         let meta = check.meta.clone();
         let state = self.states.entry(id.to_string()).or_default();
         let now = Instant::now();

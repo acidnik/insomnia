@@ -161,18 +161,19 @@ Reads the HTTP status code from stdin. Triggers when curl died (no code on stdin
 curl -sS -o /dev/null -w '%{http_code}' https://site.com/api/health | parse_curl
 ```
 
-## Running as a systemd user service
+## Running as a system systemd service
+
+A system unit (not a user unit): insomnia runs as your user but survives logout/reboot with no `loginctl enable-linger` dance.
 
 ```sh
-cargo install --path .                  # installs to ~/.cargo/bin/insomnia
-mkdir -p ~/.config/systemd/user
-cp insomnia.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now insomnia
-loginctl enable-linger                  # keep it running after logout (needed on servers)
+cargo install --path .                      # binary to ~/.cargo/bin/insomnia
+sudo cp insomnia.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now insomnia
+journalctl -u insomnia -f
 ```
 
-The unit expects the config at the default location (`~/.config/insomnia/config.toml`).
+The unit runs as `User=nik` (edit to your username) and passes the config path explicitly (`~/.config/insomnia/config.toml`), since a system service doesn't inherit your session environment.
 
 ## Deploying to a VPS (docker)
 

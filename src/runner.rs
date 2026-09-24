@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::process::Command;
 use tokio::time::sleep;
@@ -11,6 +11,7 @@ pub struct RunOutcome {
     pub timed_out: bool,
     pub stdout: String,
     pub stderr: String,
+    pub duration: Duration,
 }
 
 impl RunOutcome {
@@ -27,6 +28,7 @@ pub async fn run_check(
     vars: &[(String, String)],
     libexec_dir: Option<&Path>,
 ) -> RunOutcome {
+    let started = Instant::now();
     let mut cmd = Command::new(path);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -63,6 +65,7 @@ pub async fn run_check(
                 timed_out: false,
                 stdout: String::new(),
                 stderr: format!("spawn failed: {e}"),
+                duration: started.elapsed(),
             };
         }
     };
@@ -78,12 +81,14 @@ pub async fn run_check(
                 timed_out: false,
                 stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                duration: started.elapsed(),
             },
             Err(e) => RunOutcome {
                 code: None,
                 timed_out: false,
                 stdout: String::new(),
                 stderr: format!("wait failed: {e}"),
+                duration: started.elapsed(),
             },
         },
         _ = sleep(timeout) => {
@@ -100,6 +105,7 @@ pub async fn run_check(
                 timed_out: true,
                 stdout: String::new(),
                 stderr: String::new(),
+                duration: started.elapsed(),
             }
         }
     }

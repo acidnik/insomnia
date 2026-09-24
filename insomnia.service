@@ -1,12 +1,32 @@
+# System unit: insomnia runs without any user session (no lingering
+# needed), but as the user below — so its config, checks and state stay
+# in that user's home.
+#
+# NOTE: paths are hardcoded because %h expands to the home of the service
+# manager user (root) on some systemd versions, ignoring User=.
+#
+# Install:
+#   cargo install --path .                      # binary to ~/.cargo/bin
+#   sudo cp insomnia.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now insomnia
+#   journalctl -u insomnia -f
+
 [Unit]
 Description=insomnia — file-based monitoring daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/.cargo/bin/insomnia
+# change to your username (and the paths below)
+User=nik
+Environment=HOME=/home/nik
+# verbose run details (stdout/stderr/exit code/duration) in the journal;
+# change to info for a quieter log
+Environment=RUST_LOG=debug
+ExecStart=/home/nik/.cargo/bin/insomnia /home/nik/.config/insomnia/config.toml
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

@@ -24,6 +24,7 @@
 - Дефолты: `period=5m`, `timeout=60s`; recheck по умолчанию = period проверки (override per-check `# recheck:`); `report_restored` по умолчанию true.
 - Пока алерт активен: перепроверка раз в `recheck`, повторы алерта по расписанию `repeat` от момента последнего алерта.
 - `notify::Watcher` trait должен быть в scope для `.watch()` — без него события молча не приходят.
+- Systemd unit системный (`User=nik`): спецификатор `%h` на этом systemd разворачивается в home менеджера (`/root`), игнорируя `User=` — в `insomnia.service` пути захардкожены `/home/nik/...`
 - Новая/перезагруженная проверка получает `version+1`: устаревшие записи в heap планировщика отбрасываются по version.
 
 ## Что ещё не сделано (roadmap)
