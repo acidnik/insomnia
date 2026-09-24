@@ -15,6 +15,8 @@ pub struct Meta {
     pub report_restored: bool,
     /// wait this long and retry once before declaring failure
     pub flake: Option<String>,
+    /// re-check interval while the alert is active (overrides [defaults].recheck)
+    pub recheck: Option<String>,
     pub tags: Vec<String>,
     /// `var: name=value` pairs, passed to the check as environment variables
     pub vars: Vec<(String, String)>,
@@ -48,6 +50,7 @@ impl Meta {
                         !matches!(value.to_lowercase().as_str(), "false" | "no" | "0" | "off");
                 }
                 "flake" => meta.flake = Some(value.to_string()),
+                "recheck" => meta.recheck = Some(value.to_string()),
                 "tags" => {
                     meta.tags = value
                         .split(',')

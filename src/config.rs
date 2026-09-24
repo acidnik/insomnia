@@ -13,8 +13,8 @@ pub struct TelegramConfig {
 pub struct Defaults {
     pub period: Option<String>,
     pub timeout: Option<String>,
-    /// how often to re-check while the alert is active
-    pub recheck: Option<String>,
+    // recheck: no global default — falls back to the check's period,
+    // per-check `# recheck:` overrides
 }
 
 #[derive(Debug, Clone, Deserialize)]

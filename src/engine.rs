@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,12 +20,19 @@ pub enum FsAction {
 
 pub enum Event {
     Fs(FsAction),
+    /// debounced re-read of an edited check
+    FsRecheck(PathBuf),
+    /// ask main to (un)watch a check's symlink target file
+    Watch { path: PathBuf, add: bool },
     Done {
         id: String,
         gen: u64,
         outcome: RunOutcome,
     },
 }
+
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
+const RELOAD_DELAY: Duration = Duration::from_millis(600);
 
 // (when, version, id) — smaller Instant pops first
 type HeapEntry = Reverse<(Instant, u64, String)>;
@@ -38,9 +45,13 @@ pub struct Engine {
     tx: UnboundedSender<Event>,
     tg: Option<TelegramClient>,
     libexec_dir: Option<PathBuf>,
+    checks_dir: PathBuf,
+    /// check id -> canonical path of its symlink target (only for symlinks)
+    target_of: HashMap<String, PathBuf>,
+    /// canonical target path -> check id
+    target_id: HashMap<PathBuf, String>,
     default_period: Duration,
     default_timeout: Duration,
-    recheck_interval: Duration,
     gen_counter: u64,
 }
 
@@ -61,6 +72,9 @@ impl Engine {
             tx,
             tg,
             libexec_dir: cfg.libexec_dir.clone(),
+            checks_dir: cfg.checks_dir.clone(),
+            target_of: HashMap::new(),
+            target_id: HashMap::new(),
             default_period: cfg
                 .defaults
                 .period
@@ -71,13 +85,6 @@ impl Engine {
             default_timeout: cfg
                 .defaults
                 .timeout
-                .as_deref()
-                .map(parse_duration)
-                .transpose()?
-                .unwrap_or(Duration::from_secs(60)),
-            recheck_interval: cfg
-                .defaults
-                .recheck
                 .as_deref()
                 .map(parse_duration)
                 .transpose()?
@@ -112,24 +119,66 @@ impl Engine {
     pub fn handle_fs(&mut self, action: FsAction) {
         match action {
             FsAction::Upsert(path) => self.upsert(&path),
-            FsAction::Remove(path) => {
-                if let Some(id) = file_id(&path) {
-                    if self.checks.remove(&id).is_some() {
-                        tracing::info!("check unloaded: {id}");
-                    }
-                }
+            FsAction::Remove(path) => self.remove(&path),
+        }
+    }
+
+    /// fs event inside the watched dir
+    fn upsert(&mut self, path: &Path) {
+        let Some(id) = file_id(path) else { return };
+        // debounce editor write+rename bursts: reload after the burst settles
+        if self.reload_in_debounce(&id) {
+            self.request_reload(path);
+            return;
+        }
+        self.reload(path, id);
+    }
+
+    /// delayed re-read after the debounce window
+    pub fn handle_recheck(&mut self, path: &Path) {
+        let Some(id) = file_id(path) else { return };
+        if !self.checks.contains_key(&id) {
+            return; // removed in the meantime — do not resurrect
+        }
+        if self.reload_in_debounce(&id) {
+            self.request_reload(path);
+            return;
+        }
+        self.reload(path, id);
+    }
+
+    fn reload_in_debounce(&self, id: &str) -> bool {
+        self.checks
+            .get(id)
+            .is_some_and(|c| c.last_reload.elapsed() < RELOAD_DEBOUNCE)
+    }
+
+    fn request_reload(&mut self, path: &Path) {
+        let tx = self.tx.clone();
+        let path = path.to_path_buf();
+        tokio::spawn(async move {
+            tokio::time::sleep(RELOAD_DELAY).await;
+            let _ = tx.send(Event::FsRecheck(path));
+        });
+    }
+
+    fn remove(&mut self, path: &Path) {
+        // only the checks_dir entry itself counts; deleting a symlink's target
+        // file elsewhere must not unload the check
+        if path.parent() != Some(self.checks_dir.as_path()) {
+            return;
+        }
+        let Some(id) = file_id(path) else { return };
+        if self.checks.remove(&id).is_some() {
+            tracing::info!("check unloaded: {id}");
+            if let Some(target) = self.target_of.remove(&id) {
+                self.target_id.remove(&target);
+                let _ = self.tx.send(Event::Watch { path: target, add: false });
             }
         }
     }
 
-    fn upsert(&mut self, path: &Path) {
-        let Some(id) = file_id(path) else { return };
-        // rate-limit reload storms from editors writing + renaming
-        if let Some(existing) = self.checks.get(&id) {
-            if existing.last_reload.elapsed() < Duration::from_millis(500) {
-                return;
-            }
-        }
+    fn reload(&mut self, path: &Path, id: String) {
         if !path.is_file() {
             return;
         }
@@ -169,8 +218,33 @@ impl Engine {
             }
         }
         self.states.entry(id.clone()).or_default();
-        // a new/reloaded check runs immediately (stale heap entries are invalidated by version)
+        self.watch_target(&id);
+        // a new/reloaded check runs immediately (stale heap entries are invalidated
+        // by version, and the next schedule after the run uses the new period)
         self.schedule_at(&id, Instant::now());
+    }
+
+    /// keep an inotify watch on the file behind a symlinked check, so edits
+    /// to the real file (which lives outside the watched dir) trigger a reload
+    fn watch_target(&mut self, id: &str) {
+        let Some(check) = self.checks.get(id) else { return };
+        // symlinked checks get a file watch on their target; regular files in
+        // the checks dir are already covered by the dir watch
+        let new_target = std::fs::canonicalize(&check.path)
+            .ok()
+            .filter(|c| c != &check.path);
+        if self.target_of.get(id).map(|p| p.as_path()) == new_target.as_deref() {
+            return;
+        }
+        if let Some(old) = self.target_of.remove(id) {
+            self.target_id.remove(&old);
+            let _ = self.tx.send(Event::Watch { path: old, add: false });
+        }
+        if let Some(new) = new_target {
+            self.target_id.insert(new.clone(), id.to_string());
+            self.target_of.insert(id.to_string(), new.clone());
+            let _ = self.tx.send(Event::Watch { path: new, add: true });
+        }
     }
 
     fn schedule_at(&mut self, id: &str, when: Instant) {
@@ -235,7 +309,7 @@ impl Engine {
         let tx = self.tx.clone();
         let id = id.to_string();
 
-        tracing::debug!("running check {id}");
+        tracing::info!("running check {id}");
         tokio::spawn(async move {
             let outcome = run_check(&path, timeout, &vars, libexec.as_deref()).await;
             let _ = tx.send(Event::Done { id, gen, outcome });
@@ -256,6 +330,7 @@ impl Engine {
         let state = self.states.entry(id.to_string()).or_default();
         let now = Instant::now();
 
+        let period_dur = duration_of(&meta.period, self.default_period);
         let next: Duration;
         if ok {
             state.pending_flake = false;
@@ -267,7 +342,7 @@ impl Engine {
                     self.send_notify(id, format!("🟢 {id}: restored"));
                 }
             }
-            next = duration_of(&meta.period, self.default_period);
+            next = period_dur;
         } else {
             let flake = meta
                 .flake
@@ -294,7 +369,8 @@ impl Engine {
                         outcome.timed_out
                     );
                     self.send_notify(id, format_alert(id, &meta, &outcome));
-                    next = self.recheck_interval;
+                    // while alerting, re-check every `recheck` (default = the check's period)
+                    next = duration_of(&meta.recheck, period_dur);
                 } else {
                     // still failing: re-send per the escalation schedule
                     let schedule: Vec<Duration> = meta
@@ -319,7 +395,7 @@ impl Engine {
                             self.send_notify(id, format_alert(id, &meta, &outcome));
                         }
                     }
-                    next = self.recheck_interval;
+                    next = duration_of(&meta.recheck, period_dur);
                 }
             }
         }

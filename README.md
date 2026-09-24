@@ -37,11 +37,6 @@ period = "5m"
 # than this is killed (whole process group) and reported as failed.
 # Default: "60s"
 timeout = "60s"
-
-# How often a failing check is re-run while its alert is active. This is both
-# the recovery-detector and the repeat-alert timer.
-# Default: "1m"
-recheck = "1m"
 ```
 
 Durations are written as `30`, `30s`, `5m`, `1h`, `1h30m`, `2d` — a bare number means seconds.
@@ -82,6 +77,11 @@ A check with every option used, documented inline:
 # If the check fails, wait this long and silently retry once before alerting
 # (absorbs blips like a service being restarted). Default: disabled.
 # flake: 1m
+
+# How often to re-run the check while its alert is active. Falls back to the
+# check's own `period` — set this only if you want a different (usually
+# faster) re-check cadence while failing.
+# recheck: 10s
 
 # Everything after `var:` is passed to the check as an environment variable,
 # so parameterized helper tools can read their config from the env.

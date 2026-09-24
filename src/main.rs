@@ -72,6 +72,17 @@ async fn main() -> Result<()> {
             _ = ticker.tick() => engine.run_due(),
             ev = rx.recv() => match ev {
                 Some(Event::Fs(action)) => engine.handle_fs(action),
+                Some(Event::FsRecheck(path)) => engine.handle_recheck(&path),
+                Some(Event::Watch { path, add }) => {
+                    let res = if add {
+                        _watcher.watch(&path, notify::RecursiveMode::NonRecursive)
+                    } else {
+                        _watcher.unwatch(&path)
+                    };
+                    if let Err(e) = res {
+                        tracing::warn!("cannot {}watch {}: {e}", if add { "" } else { "un" }, path.display());
+                    }
+                }
                 Some(Event::Done { id, gen, outcome }) => engine.handle_done(&id, gen, outcome),
                 None => break,
             },

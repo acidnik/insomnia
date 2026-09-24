@@ -9,7 +9,8 @@ Environment (set via `# var: key=value` in the check header):
                   Default: empty
 
 Triggers (exit 1, prints a message) when:
-  - stdin has no HTTP code at all (curl itself died: DNS, timeout, TLS, ...)
+  - curl got no HTTP response at all: empty stdin or curl's "000" placeholder
+    (DNS failure, connect refused, timeout, TLS, ...)
   - the code is >= 400 and not listed in ignore_codes
 Otherwise exits 0.
 """
@@ -25,8 +26,11 @@ def main() -> int:
     # take the last whitespace-separated token — tolerates extra -w output
     code = raw.split()[-1] if raw else ""
 
-    if not code.isdigit():
-        print(f"curl failed: no http code in output{': ' + raw[:200] if raw else ' (empty)'}")
+    # "000" is curl's placeholder when no HTTP response was received
+    # (DNS, connect refused, timeout, TLS, ...)
+    if not code.isdigit() or code == "000":
+        detail = raw[:200] if raw else "empty"
+        print(f"curl failed: no http response ({detail})")
         return 1
 
     if code in ignore:
