@@ -327,9 +327,9 @@ impl Engine {
 
         let ok = outcome.ok();
         tracing::debug!(
-            "check {id} finished in {:?}: code={:?} timed_out={} \
+            "check {id} finished in {}: code={:?} timed_out={} \
              stdout={} stderr={}",
-            outcome.duration,
+            fmt_secs(outcome.duration),
             outcome.code,
             outcome.timed_out,
             tail(&outcome.stdout, 300),
@@ -415,6 +415,7 @@ impl Engine {
     fn send_notify(&mut self, id: &str, text: String) {
         match &self.tg {
             Some(tg) => {
+                tracing::debug!("alert -> telegram: {text}");
                 let tg = tg.clone();
                 tokio::spawn(async move {
                     if let Err(e) = tg.send(&text).await {
@@ -467,15 +468,21 @@ fn tail(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// uniform duration formatting in logs and alerts: `x.xxs`
+fn fmt_secs(d: Duration) -> String {
+    format!("{:.2}s", d.as_secs_f64())
+}
+
 fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
+    let dur = fmt_secs(outcome.duration);
     let exitcode = match (outcome.timed_out, outcome.code) {
-        (true, _) => "TIMEOUT".to_string(),
+        (true, _) => format!("TIMEOUT after {dur}"),
         (false, Some(c)) => c.to_string(),
         (false, None) => "signal".to_string(),
     };
     let stdout = tail(&outcome.stdout, 1000);
     let stderr = tail(&outcome.stderr, 1500);
-    match &meta.message {
+    let mut msg = match &meta.message {
         Some(tmpl) => tmpl
             .replace("$name", id)
             .replace("$exitcode", &exitcode)
@@ -491,5 +498,11 @@ fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
             }
             msg
         }
+    };
+    // a timed-out check usually prints nothing, so custom templates like
+    // "... ($stdout)" would end up empty and cryptic — say what happened
+    if outcome.timed_out && stdout.is_empty() && stderr.is_empty() {
+        msg.push_str(&format!("\n⏱ no output: check hung and was killed after {dur}"));
     }
+    msg
 }

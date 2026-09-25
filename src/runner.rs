@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::sleep;
 
@@ -20,8 +21,20 @@ impl RunOutcome {
     }
 }
 
+/// drain a pipe to the end; used both for normal completion and after a
+/// timeout kill (the dead process's pipes close, leaving whatever it
+/// managed to print in the buffer — that is the error message we must not
+/// lose)
+async fn drain<R: tokio::io::AsyncRead + Unpin>(mut pipe: Option<R>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Some(p) = pipe.as_mut() {
+        let _ = p.read_to_end(&mut buf).await;
+    }
+    buf
+}
+
 /// Run a check script via its `#!` shebang in its own session (process group),
-/// kill the whole group on timeout.
+/// kill the whole group on timeout. Output printed before the kill is kept.
 pub async fn run_check(
     path: &Path,
     timeout: Duration,
@@ -57,7 +70,7 @@ pub async fn run_check(
         cmd.env(k, v);
     }
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return RunOutcome {
@@ -71,25 +84,14 @@ pub async fn run_check(
     };
 
     let pid = child.id();
-    let wait = child.wait_with_output();
-    tokio::pin!(wait);
+    // take the pipes so readers can drain them independently of the child
+    let out_reader = tokio::spawn(drain(child.stdout.take()));
+    let err_reader = tokio::spawn(drain(child.stderr.take()));
 
-    tokio::select! {
-        out = &mut wait => match out {
-            Ok(out) => RunOutcome {
-                code: out.status.code(),
-                timed_out: false,
-                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                duration: started.elapsed(),
-            },
-            Err(e) => RunOutcome {
-                code: None,
-                timed_out: false,
-                stdout: String::new(),
-                stderr: format!("wait failed: {e}"),
-                duration: started.elapsed(),
-            },
+    let (code, timed_out, wait_err) = tokio::select! {
+        status = child.wait() => match status {
+            Ok(s) => (s.code(), false, None),
+            Err(e) => (None, false, Some(format!("wait failed: {e}"))),
         },
         _ = sleep(timeout) => {
             // negative pid = whole process group (we did setsid)
@@ -98,15 +100,24 @@ pub async fn run_check(
                     libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
                 }
             }
-            // the dropped wait_with_output future drops the Child; kill_on_drop(true)
-            // makes tokio send SIGKILL on top of our killpg
-            RunOutcome {
-                code: None,
-                timed_out: true,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration: started.elapsed(),
-            }
+            (None, true, None)
         }
+    };
+
+    // the killed processes' pipes are closed by now — readers return with
+    // whatever was printed before the kill
+    let stdout = out_reader.await.unwrap_or_default();
+    let stderr = err_reader.await.unwrap_or_default();
+
+    RunOutcome {
+        code,
+        timed_out,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: match (wait_err, String::from_utf8_lossy(&stderr).is_empty()) {
+            (Some(e), _) => e,
+            (None, true) => String::new(),
+            (None, false) => String::from_utf8_lossy(&stderr).into_owned(),
+        },
+        duration: started.elapsed(),
     }
 }
