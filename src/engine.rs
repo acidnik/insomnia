@@ -490,11 +490,19 @@ fn epoch_now() -> i64 {
     when_to_epoch(Instant::now())
 }
 
-fn when_to_epoch(_when: Instant) -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+/// Instant has no absolute reference point — anchor it to the wall clock on
+/// first use, then convert any Instant into unix epoch seconds relative to
+/// that anchor
+fn when_to_epoch(when: Instant) -> i64 {
+    static ANCHOR: std::sync::OnceLock<(Instant, i64)> = std::sync::OnceLock::new();
+    let (anchor_instant, anchor_epoch) = ANCHOR.get_or_init(|| {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        (Instant::now(), secs)
+    });
+    anchor_epoch + when.saturating_duration_since(*anchor_instant).as_secs() as i64
 }
 
 /// id = file name inside the watched dir (hidden files, dirs and editor temps are skipped)
