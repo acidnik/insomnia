@@ -17,6 +17,8 @@ pub struct Meta {
     pub flake: Option<String>,
     /// re-check interval while the alert is active (overrides [defaults].recheck)
     pub recheck: Option<String>,
+    /// human-readable display name used in alerts instead of the file id
+    pub name: Option<String>,
     pub tags: Vec<String>,
     /// `var: name=value` pairs, passed to the check as environment variables
     pub vars: Vec<(String, String)>,
@@ -51,6 +53,7 @@ impl Meta {
                 }
                 "flake" => meta.flake = Some(value.to_string()),
                 "recheck" => meta.recheck = Some(value.to_string()),
+                "name" => meta.name = Some(value.to_string()),
                 "tags" => {
                     meta.tags = value
                         .split(',')

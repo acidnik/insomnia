@@ -23,13 +23,26 @@ _default:
 # libexec/ is baked into the image; config.toml, checks/ and state/ are
 # bind-mounted from ~/insomnia on the host (see deploy/docker-compose.vps.yml).
 
-# Full release pipeline: push HEAD to origin, rebuild and restart on the VPS.
-deploy HOST: _check-git-clean
+# With HOST — full VPS release: push HEAD to origin, rebuild and restart there.
+# Without — local deploy: build, cargo install, restart the system service
+# (no git checks — local iteration on a dirty tree is allowed).
+deploy HOST="":
     #!/usr/bin/env bash
     set -euo pipefail
-    cd {{justfile_directory()}} && git push origin main
-    just build-vps "{{HOST}}"
-    just restart "{{HOST}}"
+    if [ -n "{{HOST}}" ]; then
+        just _check-git-clean
+        cd {{justfile_directory()}} && git push origin main
+        just build-vps "{{HOST}}"
+        just restart "{{HOST}}"
+    else
+        echo "--- Building & installing locally (cargo install)..."
+        cargo install --path {{REPO_DIR}}
+        echo "--- Restarting service..."
+        sudo systemctl restart insomnia
+        sleep 1
+        systemctl is-active insomnia && echo "✓ insomnia restarted"
+        journalctl -u insomnia -n 3 --no-pager -o cat
+    fi
 
 # Rebuild the image on the VPS. Does not touch the running container —
 # follow up with `just restart` (or run `just deploy` for the full pipeline).

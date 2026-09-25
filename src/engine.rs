@@ -348,7 +348,8 @@ impl Engine {
                 state.repeat_index = 0;
                 tracing::info!("check recovered: {id}");
                 if meta.report_restored {
-                    self.send_notify(id, format!("🟢 {id}: restored"));
+                    let name = meta.name.as_deref().unwrap_or(id);
+                    self.send_notify(id, format!("🟢 {name}: restored"));
                 }
             }
             next = period_dur;
@@ -474,6 +475,8 @@ fn fmt_secs(d: Duration) -> String {
 }
 
 fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
+    // display name replaces the file id where the check provides one
+    let id = meta.name.as_deref().unwrap_or(id);
     let dur = fmt_secs(outcome.duration);
     let exitcode = match (outcome.timed_out, outcome.code) {
         (true, _) => format!("TIMEOUT after {dur}"),

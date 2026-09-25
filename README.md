@@ -48,6 +48,11 @@ A check with every option used, documented inline:
 ```bash
 #!/usr/bin/env bash
 
+# Human-readable display name: used in alerts instead of the file id
+# ("api down" instead of "api-health.check.sh down"). No default —
+# without it alerts use the file name.
+# name: My Service API
+
 # Comma-separated tags, purely for your own grouping/filtering. No default.
 # tags: ssh, server, disk
 
@@ -59,9 +64,10 @@ A check with every option used, documented inline:
 # Falls back to [defaults].timeout (60s).
 # timeout: 30s
 
-# Alert message template. $name (check id), $exitcode, $stdout, $stderr are
+# Alert message template. $name (the display name from `# name:`, or the
+# file id), $exitcode, $stdout, $stderr are
 # substituted; long output is truncated to keep the Telegram message sane.
-# Default: "🔴 <id>: check failed (exit=<code>)" followed by stderr (or
+# Default: "🔴 $name: check failed (exit=$exitcode)" followed by stderr (or
 # stdout if stderr is empty).
 # message: myserver disk almost full ($stdout)
 
@@ -130,6 +136,8 @@ State (active alert, escalation index, counters) is persisted per check, so a da
 ## Parser details
 
 Metadata is any line matching `#\s+(\w+): (.*)`. Known keys are consumed, unknown keys are ignored, so other tooling can keep its own `# key: value` headers in the same files. Checks must be executable (`chmod +x`); hidden files, `*.tmp` and editor backups (`*~`) are skipped.
+
+If a check defines `# name:`, that name replaces the file id in Telegram alerts (failed, repeated and restored) — handy to avoid Telegram auto-linking file names like `api-health.check.sh` into fake domain links.
 
 ## Helper tools (libexec)
 
