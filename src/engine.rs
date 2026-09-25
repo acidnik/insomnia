@@ -50,6 +50,8 @@ pub struct Engine {
     target_of: HashMap<String, PathBuf>,
     /// canonical target path -> check id
     target_id: HashMap<PathBuf, String>,
+    /// canonical target parent dir -> number of checks living in it
+    watched_dirs: HashMap<PathBuf, usize>,
     default_period: Duration,
     default_timeout: Duration,
     gen_counter: u64,
@@ -75,6 +77,7 @@ impl Engine {
             checks_dir: cfg.checks_dir.clone(),
             target_of: HashMap::new(),
             target_id: HashMap::new(),
+            watched_dirs: HashMap::new(),
             default_period: cfg
                 .defaults
                 .period
@@ -125,6 +128,33 @@ impl Engine {
 
     /// fs event inside the watched dir
     fn upsert(&mut self, path: &Path) {
+        // events inside a watched target dir: reload every check living there
+        // (the event may be for the target itself or an editor temp file —
+        // reloading all of the dir's checks is cheap and debounced)
+        if let Some(dir) = path.parent() {
+            if self.watched_dirs.contains_key(dir) {
+                let ids: Vec<String> = self
+                    .target_of
+                    .iter()
+                    .filter(|(_, t)| t.parent() == Some(dir))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in ids {
+                    if self.reload_in_debounce(&id) {
+                        if let Some(p) = self.checks.get(&id).map(|c| c.path.clone()) {
+                            self.request_reload(&p);
+                        }
+                        continue;
+                    }
+                    if let Some(check) = self.checks.get(&id) {
+                        let p = check.path.clone();
+                        self.reload(&p, id);
+                    }
+                }
+                return;
+            }
+        }
+
         let Some(id) = file_id(path) else { return };
         // debounce editor write+rename bursts: reload after the burst settles
         if self.reload_in_debounce(&id) {
@@ -173,7 +203,7 @@ impl Engine {
             tracing::info!("check unloaded: {id}");
             if let Some(target) = self.target_of.remove(&id) {
                 self.target_id.remove(&target);
-                let _ = self.tx.send(Event::Watch { path: target, add: false });
+                self.unwatch_dir_for(&target);
             }
         }
     }
@@ -224,11 +254,12 @@ impl Engine {
         self.schedule_at(&id, Instant::now());
     }
 
-    /// keep an inotify watch on the file behind a symlinked check, so edits
-    /// to the real file (which lives outside the watched dir) trigger a reload
+    /// keep an inotify watch on the DIR containing a symlinked check's real
+    /// file (not the file itself: editors replace the file via rename, which
+    /// silently kills a file watch, while a dir watch survives)
     fn watch_target(&mut self, id: &str) {
         let Some(check) = self.checks.get(id) else { return };
-        // symlinked checks get a file watch on their target; regular files in
+        // symlinked checks get a dir watch on their target; regular files in
         // the checks dir are already covered by the dir watch
         let new_target = std::fs::canonicalize(&check.path)
             .ok()
@@ -238,12 +269,29 @@ impl Engine {
         }
         if let Some(old) = self.target_of.remove(id) {
             self.target_id.remove(&old);
-            let _ = self.tx.send(Event::Watch { path: old, add: false });
+            self.unwatch_dir_for(&old);
         }
         if let Some(new) = new_target {
+            let dir = new.parent().unwrap_or(Path::new("/")).to_path_buf();
             self.target_id.insert(new.clone(), id.to_string());
-            self.target_of.insert(id.to_string(), new.clone());
-            let _ = self.tx.send(Event::Watch { path: new, add: true });
+            self.target_of.insert(id.to_string(), new);
+            let count = self.watched_dirs.entry(dir.clone()).or_insert(0);
+            if *count == 0 {
+                let _ = self.tx.send(Event::Watch { path: dir, add: true });
+            }
+            *count += 1;
+        }
+    }
+
+    /// drop one reference to a target's dir watch; unwatch when the last
+    /// check living in that dir is gone
+    fn unwatch_dir_for(&mut self, target: &Path) {
+        let Some(dir) = target.parent().map(|p| p.to_path_buf()) else { return };
+        let Some(count) = self.watched_dirs.get_mut(&dir) else { return };
+        *count -= 1;
+        if *count == 0 {
+            self.watched_dirs.remove(&dir);
+            let _ = self.tx.send(Event::Watch { path: dir, add: false });
         }
     }
 
