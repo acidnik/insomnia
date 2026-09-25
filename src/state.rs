@@ -5,7 +5,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Per-check persistent state: survives daemon restarts so the daemon knows
-/// the check is already failing and does not re-alert immediately.
+/// the check is already failing and does not re-alert immediately, and knows
+/// when the check last ran (to preserve the schedule across restarts).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckState {
     pub alert_active: bool,
@@ -15,9 +16,12 @@ pub struct CheckState {
     pub repeat_index: usize,
     pub alert_count: u64,
     /// unix epoch seconds of the last alert sent
+    #[serde(default)]
     pub last_alert_at: Option<i64>,
-    /// unix epoch seconds of the next scheduled run (for restart recovery)
-    pub next_run_at: Option<i64>,
+    /// unix epoch seconds of the last run start; on startup a check runs
+    /// immediately only if period has already elapsed since this
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
 }
 
 impl Default for CheckState {
@@ -28,7 +32,7 @@ impl Default for CheckState {
             repeat_index: 0,
             alert_count: 0,
             last_alert_at: None,
-            next_run_at: None,
+            last_run_at: None,
         }
     }
 }

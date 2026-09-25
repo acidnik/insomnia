@@ -107,12 +107,9 @@ impl Engine {
         for entry in entries.flatten() {
             self.upsert(&entry.path());
         }
-        // run everything shortly after startup
-        for id in self.checks.keys().cloned().collect::<Vec<_>>() {
-            self.schedule_at(&id, Instant::now());
-        }
-        // load persistent state after checks so next_run_at from disk is not clobbered
-        // (states are loaded before scan in main; here only for safety)
+        // scheduling happens inside reload(): every check (new or existing)
+        // is scheduled from its last_run_at + period, so startup never
+        // mass-runs checks and edited periods apply from the last run moment
     }
 
     pub fn set_states(&mut self, states: States) {
@@ -249,9 +246,19 @@ impl Engine {
         }
         self.states.entry(id.clone()).or_default();
         self.watch_target(&id);
-        // a new/reloaded check runs immediately (stale heap entries are invalidated
-        // by version, and the next schedule after the run uses the new period)
-        self.schedule_at(&id, Instant::now());
+        // keep the last-run schedule: after an edit the check runs only if
+        // the (possibly shortened) period has already elapsed since the last
+        // run; a never-run check starts immediately
+        let period = duration_of(
+            &self.checks.get(&id).expect("just inserted").meta.period,
+            self.default_period,
+        );
+        let due_in = match self.states.get(&id).and_then(|s| s.last_run_at) {
+            None => Duration::ZERO,
+            Some(last) => period
+                .saturating_sub(Duration::from_secs((epoch_now() - last).max(0) as u64)),
+        };
+        self.schedule_at(&id, Instant::now() + due_in);
     }
 
     /// keep an inotify watch on the DIR containing a symlinked check's real
@@ -301,15 +308,9 @@ impl Engine {
         };
         let version = check.version;
         self.heap.push(Reverse((when, version, id.to_string())));
-        self.persist_next_run(id, when);
     }
 
-    fn persist_next_run(&mut self, id: &str, when: Instant) {
-        if let Some(state) = self.states.get_mut(id) {
-            state.next_run_at = Some(when_to_epoch(when));
-            self.store.save(id, state);
-        }
-    }
+
 
     /// pop and launch all due checks
     pub fn run_due(&mut self) {
@@ -355,12 +356,17 @@ impl Engine {
         let vars = check.meta.vars.clone();
         let libexec = self.libexec_dir.clone();
         let tx = self.tx.clone();
-        let id = id.to_string();
+        let id_owned = id.to_string();
+
+        // remember the run start so the schedule survives restarts
+        let state = self.states.entry(id.to_string()).or_default();
+        state.last_run_at = Some(epoch_now());
+        self.store.save(id, state);
 
         tracing::info!("running check {id}");
         tokio::spawn(async move {
             let outcome = run_check(&path, timeout, &vars, libexec.as_deref()).await;
-            let _ = tx.send(Event::Done { id, gen, outcome });
+            let _ = tx.send(Event::Done { id: id_owned, gen, outcome });
         });
     }
 

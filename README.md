@@ -131,7 +131,7 @@ The simplest possible check — just an exit code:
 3. Still failing later → repeat alerts follow the `repeat` schedule, counted from the previous alert.
 4. Check succeeds → `🟢 restored` (unless `report_restored: false`), back to the normal `period` schedule.
 
-State (active alert, escalation index, counters) is persisted per check, so a daemon restart does not re-alert for already-known failures.
+State (active alert, escalation index, counters, **last run time**) is persisted per check. A daemon restart does not re-alert for already-known failures, and does **not** re-run every check: a check runs after restart only if its period has already elapsed since the last run (edited periods apply from the last run moment); otherwise it keeps its schedule.
 
 ## Parser details
 
@@ -206,6 +206,8 @@ just restart root@server.com    # restart container only
 ```
 
 Drop new checks into `~/insomnia/checks` on the VPS — the daemon picks them up via inotify, no redeploy needed.
+
+Hot-reload semantics: editing a check re-reads it but does **not** run it immediately — the run schedule is `last run + period`. It runs right away only if the (possibly shortened) period has already elapsed since the last run; a brand-new check runs immediately.
 
 ## Mutual monitoring — who guards the guards
 
