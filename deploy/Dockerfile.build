@@ -10,21 +10,17 @@
 # Cargo registry and build artifacts live in BuildKit cache mounts:
 # they persist between builds (incremental), don't pollute the host and
 # aren't part of any image layer.
+#
+# NOTE: no dummy-main prebuild layer here. It is a known mtime trap: COPY
+# preserves host mtimes, cargo may consider the cache fresh and export the
+# compiled dummy (tiny binary, silent exit 0). Cache mounts alone give
+# incremental builds.
 
 FROM rust:1-bookworm AS build
 WORKDIR /build
 # keep build artifacts on the cache mount, not in the image layer
 ENV CARGO_TARGET_DIR=/target
 
-# compile dependencies first: this layer stays cached while only the code
-# changes (standard Cargo.toml/lock + dummy main trick)
-COPY Cargo.toml Cargo.lock ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/target \
-    mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release
-
-# now the real build (cache mounts vanish after the RUN — copy the binary
-# out to a regular path within the same RUN)
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/target \
