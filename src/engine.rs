@@ -400,10 +400,21 @@ impl Engine {
             if state.alert_active {
                 state.alert_active = false;
                 state.repeat_index = 0;
+                // take() clears failing_since; the borrow must end before
+                // send_notify (&mut self)
+                let downtime = state
+                    .failing_since
+                    .take()
+                    .map(|s| epoch_now() - s)
+                    .map(|secs| Duration::from_secs(secs.max(0) as u64));
                 tracing::info!("check recovered: {id}");
                 if meta.report_restored {
                     let name = meta.name.as_deref().unwrap_or(id);
-                    self.send_notify(id, format!("🟢 {name}: restored"));
+                    let after = match downtime {
+                        Some(d) => format!(" after {}", fmt_human(d)),
+                        None => String::new(),
+                    };
+                    self.send_notify(id, format!("🟢 {name}: restored{after}"));
                 }
             }
             next = period_dur;
@@ -426,6 +437,7 @@ impl Engine {
                     state.alert_active = true;
                     state.repeat_index = 0;
                     state.alert_count += 1;
+                    state.failing_since = Some(epoch_now());
                     state.last_alert_at = Some(epoch_now());
                     tracing::warn!(
                         "check failed: {id} (code={:?} timed_out={})",
@@ -536,6 +548,29 @@ fn fmt_secs(d: Duration) -> String {
     format!("{:.2}s", d.as_secs_f64())
 }
 
+/// human-readable duration in the config style: `5m 30s`, `1h 2m`, `2d 3h`
+fn fmt_human(d: Duration) -> String {
+    let total = d.as_secs();
+    let days = total / 86400;
+    let hours = (total % 86400) / 3600;
+    let mins = (total % 3600) / 60;
+    let secs = total % 60;
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if mins > 0 {
+        parts.push(format!("{mins}m"));
+    }
+    if secs > 0 || parts.is_empty() {
+        parts.push(format!("{secs}s"));
+    }
+    parts.join(" ")
+}
+
 fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
     // display name replaces the file id where the check provides one
     let id = meta.name.as_deref().unwrap_or(id);
@@ -570,4 +605,19 @@ fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
         msg.push_str(&format!("\n⏱ no output: check hung and was killed after {dur}"));
     }
     msg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fmt_human_matches_config_style() {
+        assert_eq!(fmt_human(Duration::from_secs(5)), "5s");
+        assert_eq!(fmt_human(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(fmt_human(Duration::from_secs(300)), "5m");
+        assert_eq!(fmt_human(Duration::from_secs(3725)), "1h 2m 5s");
+        assert_eq!(fmt_human(Duration::from_secs(90000)), "1d 1h");
+        assert_eq!(fmt_human(Duration::from_millis(240)), "0s");
+    }
 }

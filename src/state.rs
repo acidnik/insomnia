@@ -18,6 +18,10 @@ pub struct CheckState {
     /// unix epoch seconds of the last alert sent
     #[serde(default)]
     pub last_alert_at: Option<i64>,
+    /// unix epoch seconds of the moment the current alert started
+    /// (first failure of the incident); cleared on recovery
+    #[serde(default)]
+    pub failing_since: Option<i64>,
     /// unix epoch seconds of the last run start; on startup a check runs
     /// immediately only if period has already elapsed since this
     #[serde(default)]
@@ -32,6 +36,7 @@ impl Default for CheckState {
             repeat_index: 0,
             alert_count: 0,
             last_alert_at: None,
+            failing_since: None,
             last_run_at: None,
         }
     }
