@@ -10,7 +10,8 @@ Checks are alerted on **non-zero exit code or timeout**. `stdout`/`stderr` of th
 
 ```toml
 # Where check scripts live. The daemon watches this dir with inotify:
-# adding/editing/removing a file (or a symlink to one) takes effect immediately.
+# adding/editing/removing a file (or a symlink to one) takes effect at once
+# (editor save bursts are debounced by a second).
 checks_dir = "~/.config/insomnia/checks"
 
 # Where per-check state JSON files are stored. Needed so the daemon remembers
@@ -208,6 +209,8 @@ just restart root@server.com    # restart container only
 Drop new checks into `~/insomnia/checks` on the VPS — the daemon picks them up via inotify, no redeploy needed.
 
 Hot-reload semantics: editing a check re-reads it but does **not** run it immediately — the run schedule is `last run + period`. It runs right away only if the (possibly shortened) period has already elapsed since the last run; a brand-new check runs immediately.
+
+Saving a file in an editor is a burst of inotify events (temp file, write, chmod, rename), so re-reads are debounced: the check is re-read once, a second after the last event of the burst. Removing a check takes effect immediately (its runs stop at once).
 
 ## Mutual monitoring — who guards the guards
 

@@ -20,8 +20,10 @@ pub enum FsAction {
 
 pub enum Event {
     Fs(FsAction),
-    /// debounced re-read of an edited check
-    FsRecheck(PathBuf),
+    /// debounced re-read of an edited check; `token` identifies the debounce
+    /// window it was scheduled in, so timers superseded by a fresher fs event
+    /// can be dropped
+    FsRecheck { path: PathBuf, token: u64 },
     /// ask main to (un)watch a check's symlink target file
     Watch { path: PathBuf, add: bool },
     Done {
@@ -31,8 +33,10 @@ pub enum Event {
     },
 }
 
-const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
-const RELOAD_DELAY: Duration = Duration::from_millis(600);
+/// a save in an editor is a burst of inotify events (temp file, write, chmod,
+/// rename, ...) — the check is re-read only after the burst has been quiet
+/// for this long
+const RELOAD_DEBOUNCE: Duration = Duration::from_secs(1);
 
 // (when, version, id) — smaller Instant pops first
 type HeapEntry = Reverse<(Instant, u64, String)>;
@@ -52,9 +56,12 @@ pub struct Engine {
     target_id: HashMap<PathBuf, String>,
     /// canonical target parent dir -> number of checks living in it
     watched_dirs: HashMap<PathBuf, usize>,
+    /// check id -> token of its newest pending debounce timer
+    pending_reloads: HashMap<String, u64>,
     default_period: Duration,
     default_timeout: Duration,
     gen_counter: u64,
+    reload_token: u64,
 }
 
 impl Engine {
@@ -78,6 +85,7 @@ impl Engine {
             target_of: HashMap::new(),
             target_id: HashMap::new(),
             watched_dirs: HashMap::new(),
+            pending_reloads: HashMap::new(),
             default_period: cfg
                 .defaults
                 .period
@@ -93,6 +101,7 @@ impl Engine {
                 .transpose()?
                 .unwrap_or(Duration::from_secs(60)),
             gen_counter: 0,
+            reload_token: 0,
         })
     }
 
@@ -104,8 +113,12 @@ impl Engine {
                 return;
             }
         };
+        // startup loads directly: the debounce is for fs events during the run
         for entry in entries.flatten() {
-            self.upsert(&entry.path());
+            let path = entry.path();
+            if let Some(id) = file_id(&path) {
+                self.reload(&path, id);
+            }
         }
         // scheduling happens inside reload(): every check (new or existing)
         // is scheduled from its last_run_at + period, so startup never
@@ -118,16 +131,23 @@ impl Engine {
 
     pub fn handle_fs(&mut self, action: FsAction) {
         match action {
-            FsAction::Upsert(path) => self.upsert(&path),
-            FsAction::Remove(path) => self.remove(&path),
+            FsAction::Upsert(path) => {
+                tracing::debug!("fs event: upsert {}", path.display());
+                self.upsert(&path)
+            }
+            FsAction::Remove(path) => {
+                tracing::debug!("fs event: remove {}", path.display());
+                self.remove(&path)
+            }
         }
     }
 
     /// fs event inside the watched dir
     fn upsert(&mut self, path: &Path) {
-        // events inside a watched target dir: reload every check living there
-        // (the event may be for the target itself or an editor temp file —
-        // reloading all of the dir's checks is cheap and debounced)
+        // events inside a watched target dir: debounce every check living there
+        // (the event may be for the target itself or for an editor temp file —
+        // re-reading all of the dir's checks is cheap, and the debounce turns
+        // the burst into a single reload)
         if let Some(dir) = path.parent() {
             if self.watched_dirs.contains_key(dir) {
                 let ids: Vec<String> = self
@@ -137,62 +157,51 @@ impl Engine {
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in ids {
-                    if self.reload_in_debounce(&id) {
-                        if let Some(p) = self.checks.get(&id).map(|c| c.path.clone()) {
-                            self.request_reload(&p);
-                        }
-                        continue;
-                    }
-                    if let Some(check) = self.checks.get(&id) {
-                        let p = check.path.clone();
-                        self.reload(&p, id);
+                    if let Some(p) = self.checks.get(&id).map(|c| c.path.clone()) {
+                        self.request_reload(&p);
                     }
                 }
                 return;
             }
         }
-
-        let Some(id) = file_id(path) else { return };
-        // debounce editor write+rename bursts: reload after the burst settles
-        if self.reload_in_debounce(&id) {
-            self.request_reload(path);
-            return;
-        }
-        self.reload(path, id);
+        // editor temp files are filtered out by file_id: the rename onto the
+        // real name is the event that matters
+        self.request_reload(path);
     }
 
-    /// delayed re-read after the debounce window
-    pub fn handle_recheck(&mut self, path: &Path) {
+    /// debounce window elapsed for this check — the fs event that started it
+    /// has not been followed by a fresher one
+    pub fn handle_recheck(&mut self, path: &Path, token: u64) {
         let Some(id) = file_id(path) else { return };
-        if !self.checks.contains_key(&id) {
+        if self.pending_reloads.get(&id) != Some(&token) {
+            return; // a fresher fs event restarted the window
+        }
+        self.pending_reloads.remove(&id);
+        if !path.is_file() {
             return; // removed in the meantime — do not resurrect
         }
-        if self.reload_in_debounce(&id) {
-            self.request_reload(path);
-            return;
-        }
         self.reload(path, id);
     }
 
-    fn reload_in_debounce(&self, id: &str) -> bool {
-        self.checks
-            .get(id)
-            .is_some_and(|c| c.last_reload.elapsed() < RELOAD_DEBOUNCE)
-    }
-
+    /// (re)start the debounce window; only the timer started by the last fs
+    /// event of a burst passes the token check in handle_recheck
     fn request_reload(&mut self, path: &Path) {
+        let Some(id) = file_id(path) else { return };
+        self.reload_token += 1;
+        let token = self.reload_token;
+        self.pending_reloads.insert(id, token);
         let tx = self.tx.clone();
         let path = path.to_path_buf();
         tokio::spawn(async move {
-            tokio::time::sleep(RELOAD_DELAY).await;
-            let _ = tx.send(Event::FsRecheck(path));
+            tokio::time::sleep(RELOAD_DEBOUNCE).await;
+            let _ = tx.send(Event::FsRecheck { path, token });
         });
     }
 
     fn remove(&mut self, path: &Path) {
         // only the checks_dir entry itself counts; deleting a symlink's target
         // file elsewhere must not unload the check
-        if path.parent() != Some(self.checks_dir.as_path()) {
+        if !self.in_checks_dir(path) {
             return;
         }
         let Some(id) = file_id(path) else { return };
@@ -203,6 +212,16 @@ impl Engine {
                 self.unwatch_dir_for(&target);
             }
         }
+    }
+
+    /// events are reported with the path spelling notify uses, which is not
+    /// necessarily the config spelling (a relative checks_dir comes back
+    /// absolute from a dir watch), so compare canonical paths
+    fn in_checks_dir(&self, path: &Path) -> bool {
+        let (Ok(dir), Some(parent)) = (self.checks_dir.canonicalize(), path.parent()) else {
+            return false;
+        };
+        parent.canonicalize().map(|p| p == dir).unwrap_or(false)
     }
 
     fn reload(&mut self, path: &Path, id: String) {
@@ -233,7 +252,6 @@ impl Engine {
                 existing.version += 1;
                 existing.meta = meta;
                 existing.path = path.to_path_buf();
-                existing.last_reload = Instant::now();
                 tracing::info!("check reloaded: {id}");
             }
             None => {
@@ -266,11 +284,18 @@ impl Engine {
     /// silently kills a file watch, while a dir watch survives)
     fn watch_target(&mut self, id: &str) {
         let Some(check) = self.checks.get(id) else { return };
-        // symlinked checks get a dir watch on their target; regular files in
-        // the checks dir are already covered by the dir watch
-        let new_target = std::fs::canonicalize(&check.path)
-            .ok()
-            .filter(|c| c != &check.path);
+        // only symlinked checks get a dir watch on their target: a regular file
+        // living in the checks dir is already covered by the dir watch.
+        // Detected by the symlink bit, not by comparing paths — with a relative
+        // checks_dir every file would look like it points outside its own dir
+        let is_symlink = std::fs::symlink_metadata(&check.path)
+            .map(|md| md.is_symlink())
+            .unwrap_or(false);
+        let new_target = if is_symlink {
+            std::fs::canonicalize(&check.path).ok()
+        } else {
+            None
+        };
         if self.target_of.get(id).map(|p| p.as_path()) == new_target.as_deref() {
             return;
         }
@@ -644,6 +669,62 @@ mod tests {
             format_repeat_alert("web.check.sh", &meta, &failed(), Duration::from_secs(9000)),
             "🔴 web: check failed (exit=1)\n(down for 2h 30m)"
         );
+    }
+
+    /// an editor save is a burst of fs events: the check must be re-read once,
+    /// after the burst has been quiet for the debounce window
+    #[tokio::test]
+    async fn fs_burst_collapses_into_one_reload() {
+        use tokio::sync::mpsc;
+
+        let root = std::env::temp_dir().join(format!("insomnia-debounce-{}", std::process::id()));
+        let checks_dir = root.join("checks");
+        std::fs::create_dir_all(&checks_dir).unwrap();
+        let path = checks_dir.join("burst.check.sh");
+        std::fs::write(&path, "#!/usr/bin/env bash\n# period: 1h\nexit 0\n").unwrap();
+        // checks must be executable, otherwise reload() skips them
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cfg = Config {
+            checks_dir: checks_dir.clone(),
+            state_dir: Some(root.join("state")),
+            libexec_dir: None,
+            telegram: None,
+            defaults: crate::config::Defaults::default(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(&cfg, tx).unwrap();
+        engine.scan_dir(&checks_dir);
+        assert_eq!(engine.checks.get("burst.check.sh").unwrap().version, 1);
+
+        // five events, all inside one debounce window
+        for _ in 0..5 {
+            engine.upsert(&path);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(RELOAD_DEBOUNCE + Duration::from_millis(50)).await;
+
+        let mut timers = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::FsRecheck { path, token } = ev {
+                timers.push((path, token));
+            }
+        }
+        assert_eq!(timers.len(), 5, "every fs event starts its own timer");
+        for (path, token) in timers {
+            engine.handle_recheck(&path, token);
+        }
+
+        assert_eq!(
+            engine.checks.get("burst.check.sh").unwrap().version,
+            2,
+            "the burst must produce exactly one reload"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

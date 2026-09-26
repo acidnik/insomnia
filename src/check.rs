@@ -14,8 +14,6 @@ pub struct Check {
     pub version: u64,
     /// generation of the in-flight run, if any
     pub running_gen: Option<u64>,
-    /// rate limiting of reloads triggered by multiple fs events
-    pub last_reload: std::time::Instant,
 }
 
 impl Check {
@@ -26,7 +24,6 @@ impl Check {
             meta,
             version,
             running_gen: None,
-            last_reload: std::time::Instant::now(),
         }
     }
 }

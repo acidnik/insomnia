@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
             _ = ticker.tick() => engine.run_due(),
             ev = rx.recv() => match ev {
                 Some(Event::Fs(action)) => engine.handle_fs(action),
-                Some(Event::FsRecheck(path)) => engine.handle_recheck(&path),
+                Some(Event::FsRecheck { path, token }) => engine.handle_recheck(&path, token),
                 Some(Event::Watch { path, add }) => {
                     let res = if add {
                         _watcher.watch(&path, notify::RecursiveMode::NonRecursive)
