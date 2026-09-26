@@ -131,12 +131,14 @@ impl Engine {
 
     pub fn handle_fs(&mut self, action: FsAction) {
         match action {
+            // trace, not debug: one editor save is a dozen events, and the
+            // unit runs with RUST_LOG=debug
             FsAction::Upsert(path) => {
-                tracing::debug!("fs event: upsert {}", path.display());
+                tracing::trace!("fs event: upsert {}", path.display());
                 self.upsert(&path)
             }
             FsAction::Remove(path) => {
-                tracing::debug!("fs event: remove {}", path.display());
+                tracing::trace!("fs event: remove {}", path.display());
                 self.remove(&path)
             }
         }
