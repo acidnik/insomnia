@@ -1,16 +1,19 @@
-# System unit: insomnia runs without any user session (no lingering
-# needed), but as the user below — so its config, checks and state stay
-# in that user's home.
+# User unit: insomnia runs inside your own systemd user manager, so there is
+# no User=/HOME= to keep in sync — %h is your home and config, checks and
+# state stay where they already live.
 #
-# NOTE: paths are hardcoded because %h expands to the home of the service
-# manager user (root) on some systemd versions, ignoring User=.
+# A user manager is stopped when your last session ends, which would kill the
+# daemon on logout. Enable lingering once to make the manager (and the unit)
+# survive logout and start on boot:
+#   loginctl enable-linger $USER
 #
 # Install:
 #   cargo install --path .                      # binary to ~/.cargo/bin
-#   sudo cp insomnia.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now insomnia
-#   journalctl -u insomnia -f
+#   mkdir -p ~/.config/systemd/user
+#   cp insomnia.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now insomnia
+#   journalctl --user -u insomnia -f
 
 [Unit]
 Description=insomnia — file-based monitoring daemon
@@ -18,15 +21,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# change to your username (and the paths below)
-User=nik
-Environment=HOME=/home/nik
 # verbose run details (stdout/stderr/exit code/duration) in the journal;
 # change to info for a quieter log
 Environment=RUST_LOG=debug
-ExecStart=/home/nik/.cargo/bin/insomnia /home/nik/.config/insomnia/config.toml
+ExecStart=%h/.cargo/bin/insomnia %h/.config/insomnia/config.toml
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

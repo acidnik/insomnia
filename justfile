@@ -24,8 +24,8 @@ _default:
 # bind-mounted from ~/insomnia on the host (see deploy/docker-compose.vps.yml).
 
 # With HOST — full VPS release: push HEAD to origin, rebuild and restart there.
-# Without — local deploy: build, cargo install, restart the system service
-# (no git checks — local iteration on a dirty tree is allowed).
+# Without — local deploy: build, cargo install, restart the systemd user
+# service (no git checks — local iteration on a dirty tree is allowed).
 deploy HOST="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -38,10 +38,10 @@ deploy HOST="":
         echo "--- Building & installing locally (cargo install)..."
         cargo install --path {{REPO_DIR}}
         echo "--- Restarting service..."
-        sudo systemctl restart insomnia
+        systemctl --user restart insomnia
         sleep 1
-        systemctl is-active insomnia && echo "✓ insomnia restarted"
-        journalctl -u insomnia -n 3 --no-pager -o cat
+        systemctl --user is-active insomnia && echo "✓ insomnia restarted"
+        journalctl --user -u insomnia -n 3 --no-pager -o cat
     fi
 
 # Rebuild the image on the VPS. Does not touch the running container —

@@ -170,19 +170,24 @@ Reads the HTTP status code from stdin. Triggers when curl died (no code on stdin
 curl -sS -o /dev/null -w '%{http_code}' https://site.com/api/health | parse_curl
 ```
 
-## Running as a system systemd service
+## Running as a systemd user service
 
-A system unit (not a user unit): insomnia runs as your user but survives logout/reboot with no `loginctl enable-linger` dance.
+A *user* unit, so no root anywhere: the daemon lives in your own systemd manager and inherits your home (`~/.config/insomnia/config.toml`, `~/.local/state/insomnia`) with no paths to edit.
+
+The one requirement is **lingering**: by default your user manager is torn down when the last session ends, which would stop the daemon at logout. Enable it once — and the unit then also starts on boot before you log in:
 
 ```sh
-cargo install --path .                      # binary to ~/.cargo/bin/insomnia
-sudo cp insomnia.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now insomnia
-journalctl -u insomnia -f
+loginctl enable-linger $USER             # survive logout, start on boot
+
+cargo install --path .                   # binary to ~/.cargo/bin/insomnia
+mkdir -p ~/.config/systemd/user
+cp insomnia.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now insomnia
+journalctl --user -u insomnia -f
 ```
 
-The unit runs as `User=nik` (edit to your username) and passes the config path explicitly (`~/.config/insomnia/config.toml`), since a system service doesn't inherit your session environment.
+All service commands go through the user manager: `systemctl --user status|restart|stop insomnia`, `journalctl --user -u insomnia`. Check lingering with `loginctl show-user $USER | grep Linger`.
 
 Log levels: `info` (default) — check load/unload/reload and alerts; `debug` — plus per-run results and Telegram sends (what the unit sets); `trace` — plus every inotify event, which is one line per temp file, write and rename of an editor save, so it is only useful when debugging the watcher itself.
 
