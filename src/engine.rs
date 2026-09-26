@@ -397,16 +397,17 @@ impl Engine {
         let next: Duration;
         if ok {
             state.pending_flake = false;
+            // the incident ends here even if it never got past the flake
+            // retry; take() also clears failing_since, and the borrow must
+            // end before send_notify (&mut self)
+            let downtime = state
+                .failing_since
+                .take()
+                .map(|s| epoch_now() - s)
+                .map(|secs| Duration::from_secs(secs.max(0) as u64));
             if state.alert_active {
                 state.alert_active = false;
                 state.repeat_index = 0;
-                // take() clears failing_since; the borrow must end before
-                // send_notify (&mut self)
-                let downtime = state
-                    .failing_since
-                    .take()
-                    .map(|s| epoch_now() - s)
-                    .map(|secs| Duration::from_secs(secs.max(0) as u64));
                 tracing::info!("check recovered: {id}");
                 if meta.report_restored {
                     let name = meta.name.as_deref().unwrap_or(id);
@@ -419,6 +420,10 @@ impl Engine {
             }
             next = period_dur;
         } else {
+            // the incident starts at the first failed run, not at the alert:
+            // repeat and restored messages count the downtime from here
+            // (flake retries included)
+            let down_since = *state.failing_since.get_or_insert(epoch_now());
             let flake = meta
                 .flake
                 .as_deref()
@@ -437,7 +442,6 @@ impl Engine {
                     state.alert_active = true;
                     state.repeat_index = 0;
                     state.alert_count += 1;
-                    state.failing_since = Some(epoch_now());
                     state.last_alert_at = Some(epoch_now());
                     tracing::warn!(
                         "check failed: {id} (code={:?} timed_out={})",
@@ -468,7 +472,9 @@ impl Engine {
                             state.alert_count += 1;
                             state.last_alert_at = Some(epoch_now());
                             tracing::warn!("repeat alert: {id}");
-                            self.send_notify(id, format_alert(id, &meta, &outcome));
+                            let down =
+                                Duration::from_secs((epoch_now() - down_since).max(0) as u64);
+                            self.send_notify(id, format_repeat_alert(id, &meta, &outcome, down));
                         }
                     }
                     next = duration_of(&meta.recheck, period_dur);
@@ -607,9 +613,38 @@ fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
     msg
 }
 
+/// repeat alerts say how long the service has been down: `(down for 2h 30m)`;
+/// appended on its own line so custom `# message:` templates stay untouched
+fn format_repeat_alert(id: &str, meta: &Meta, outcome: &RunOutcome, down: Duration) -> String {
+    format!(
+        "{}\n(down for {})",
+        format_alert(id, meta, outcome),
+        fmt_human(down)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failed() -> RunOutcome {
+        RunOutcome {
+            code: Some(1),
+            timed_out: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn repeat_alert_appends_downtime() {
+        let meta = Meta::parse("# name: web\n");
+        assert_eq!(
+            format_repeat_alert("web.check.sh", &meta, &failed(), Duration::from_secs(9000)),
+            "🔴 web: check failed (exit=1)\n(down for 2h 30m)"
+        );
+    }
 
     #[test]
     fn fmt_human_matches_config_style() {

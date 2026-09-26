@@ -126,10 +126,10 @@ The simplest possible check — just an exit code:
 
 ## Alert lifecycle
 
-1. Check fails → if `flake` is set, it is silently retried once after that interval.
+1. Check fails → this is when the incident starts (downtime is counted from here); if `flake` is set, the check is silently retried once after that interval.
 2. Still failing → alert is sent, the check re-runs every `recheck` (default 1m).
-3. Still failing later → repeat alerts follow the `repeat` schedule, counted from the previous alert.
-4. Check succeeds → `🟢 restored` (unless `report_restored: false`), back to the normal `period` schedule.
+3. Still failing later → repeat alerts follow the `repeat` schedule, counted from the previous alert; each one ends with the total downtime, `(down for 2h 30m)`.
+4. Check succeeds → `🟢 restored after 2h 32m` (unless `report_restored: false`), back to the normal `period` schedule.
 
 State (active alert, escalation index, counters, **last run time**) is persisted per check. A daemon restart does not re-alert for already-known failures, and does **not** re-run every check: a check runs after restart only if its period has already elapsed since the last run (edited periods apply from the last run moment); otherwise it keeps its schedule.
 
