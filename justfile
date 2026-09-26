@@ -25,7 +25,8 @@ _default:
 
 # With HOST — full VPS release: push HEAD to origin, rebuild and restart there.
 # Without — local deploy: build, cargo install, restart the systemd user
-# service (no git checks — local iteration on a dirty tree is allowed).
+# service. Uncommitted changes abort the deploy (the installed binary must
+# match a commit); being ahead of origin is fine.
 deploy HOST="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -35,6 +36,7 @@ deploy HOST="":
         just build-vps "{{HOST}}"
         just restart "{{HOST}}"
     else
+        just _check-git-dirty
         echo "--- Building & installing locally (cargo install)..."
         cargo install --path {{REPO_DIR}}
         echo "--- Restarting service..."
@@ -123,13 +125,18 @@ restart HOST="":
 
 # ─── Internal helpers ───────────────────────────────────────────────────────
 
-# Verify the working tree is clean and all commits are pushed.
-_check-git-clean:
+# Verify the working tree has no uncommitted changes. Untracked files are not
+# checked on purpose: tmp/ and other scratch are gitignored and never deployed.
+_check-git-dirty:
     @echo "Checking git working copy..."
     @cd {{justfile_directory()}} && \
         git diff --quiet --exit-code || (echo "❌ Uncommitted changes"; exit 1)
     @cd {{justfile_directory()}} && \
         git diff --cached --quiet --exit-code || (echo "❌ Staged but uncommitted changes"; exit 1)
+    @echo "✓ Git working copy is clean"
+
+# Verify the working tree is clean and all commits are pushed.
+_check-git-clean: _check-git-dirty
     @cd {{justfile_directory()}} && \
         (git rev-parse --abbrev-ref @{u} &>/dev/null) || \
         (echo "❌ no upstream; push first"; exit 1)
