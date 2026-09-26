@@ -385,7 +385,9 @@ impl Engine {
         let tx = self.tx.clone();
         let id_owned = id.to_string();
 
-        // remember the run start so the schedule survives restarts
+        // schedule durability: save the run start before running, so a
+        // restart in the middle of a run does not consider it overdue (the
+        // state after the run is saved in handle_done)
         let state = self.states.entry(id.to_string()).or_default();
         state.last_run_at = Some(epoch_now());
         self.store.save(id, state);
@@ -510,6 +512,13 @@ impl Engine {
         }
 
         self.schedule_at(id, now + next);
+        // persist the post-run state, not just the run-start snapshot: the
+        // run-start save is one outcome stale, so a restart would load an
+        // alert that has already been restored (and re-send "restored" with
+        // an ever-growing downtime) or lose a brand-new one
+        if let Some(state) = self.states.get(id) {
+            self.store.save(id, state);
+        }
     }
 
     fn send_notify(&mut self, id: &str, text: String) {
@@ -664,6 +673,16 @@ mod tests {
         }
     }
 
+    fn ok() -> RunOutcome {
+        RunOutcome {
+            code: Some(0),
+            timed_out: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_secs(1),
+        }
+    }
+
     #[test]
     fn repeat_alert_appends_downtime() {
         let meta = Meta::parse("# name: web\n");
@@ -726,6 +745,64 @@ mod tests {
             2,
             "the burst must produce exactly one reload"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// the run-start snapshot lags one outcome behind: persisting only that
+    /// snapshot made every daemon restart resurrect an alert that had already
+    /// been reported as restored — the repeated "restored after 3h/4h" spam
+    /// with a downtime counted from the original incident
+    #[tokio::test]
+    async fn run_outcome_is_persisted_not_only_the_run_start() {
+        use tokio::sync::mpsc;
+
+        let root = std::env::temp_dir().join(format!("insomnia-state-{}", std::process::id()));
+        let checks_dir = root.join("checks");
+        let state_dir = root.join("state");
+        std::fs::create_dir_all(&checks_dir).unwrap();
+        let id = "flap.check.sh";
+        let path = checks_dir.join(id);
+        std::fs::write(&path, "#!/usr/bin/env bash\n# period: 1h\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cfg = Config {
+            checks_dir: checks_dir.clone(),
+            state_dir: Some(state_dir.clone()),
+            libexec_dir: None,
+            telegram: None,
+            defaults: crate::config::Defaults::default(),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(&cfg, tx).unwrap();
+        engine.scan_dir(&checks_dir);
+
+        engine.spawn_run(id);
+        let gen = engine.checks.get(id).unwrap().running_gen.unwrap();
+        engine.handle_done(id, gen, failed());
+        assert!(engine.states.get(id).unwrap().alert_active);
+
+        // the failure itself must be on disk, so a restart does not re-alert
+        let persisted = StateStore::new(state_dir.clone()).load_all().unwrap();
+        assert!(persisted.get(id).unwrap().alert_active);
+
+        // the next run recovers — the alert is gone in memory by now
+        engine.spawn_run(id);
+        let gen = engine.checks.get(id).unwrap().running_gen.unwrap();
+        engine.handle_done(id, gen, ok());
+        assert!(!engine.states.get(id).unwrap().alert_active);
+
+        // what a restart would load
+        let persisted = StateStore::new(state_dir).load_all().unwrap();
+        let state = persisted.get(id).expect("state file");
+        assert!(
+            !state.alert_active,
+            "a restart must not resurrect an alert that was already restored"
+        );
+        assert!(state.failing_since.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

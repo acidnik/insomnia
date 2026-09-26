@@ -132,7 +132,7 @@ The simplest possible check — just an exit code:
 3. Still failing later → repeat alerts follow the `repeat` schedule, counted from the previous alert; each one ends with the total downtime, `(down for 2h 30m)`.
 4. Check succeeds → `🟢 restored after 2h 32m` (unless `report_restored: false`), back to the normal `period` schedule.
 
-State (active alert, escalation index, counters, **last run time**) is persisted per check. A daemon restart does not re-alert for already-known failures, and does **not** re-run every check: a check runs after restart only if its period has already elapsed since the last run (edited periods apply from the last run moment); otherwise it keeps its schedule.
+State (active alert, escalation index, counters, **last run time**) is persisted per check — at run start (for the schedule) and again after every run (for the alert state). A daemon restart does not re-alert for already-known failures, and does **not** re-run every check: a check runs after restart only if its period has already elapsed since the last run (edited periods apply from the last run moment); otherwise it keeps its schedule.
 
 ## Parser details
 
