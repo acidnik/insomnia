@@ -9,6 +9,17 @@ pub struct TelegramConfig {
     pub chat_id: String,
 }
 
+/// `[quiet_time]` — the daily window, in local wall-clock time, during which
+/// nothing is sent; see `quiet.rs` for what happens to held-back messages
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuietTimeConfig {
+    /// window start, `HH:MM`, inclusive
+    pub from: String,
+    /// window end, `HH:MM`, exclusive; `from > to` means the window crosses
+    /// midnight (`23:00` → `07:00`), `from < to` that it sits inside one day
+    pub to: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Defaults {
     pub period: Option<String>,
@@ -24,6 +35,8 @@ pub struct Config {
     /// dir with helper tools (parse_df, parse_curl, ...) prepended to PATH of checks
     pub libexec_dir: Option<PathBuf>,
     pub telegram: Option<TelegramConfig>,
+    /// optional daily window with no notifications at all (see quiet.rs)
+    pub quiet_time: Option<QuietTimeConfig>,
     #[serde(default)]
     pub defaults: Defaults,
 }

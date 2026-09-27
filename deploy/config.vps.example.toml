@@ -20,3 +20,11 @@ chat_id = "..."
 [defaults]
 period = "5m"
 timeout = "60s"
+
+# Quiet hours: a daily local-time window with no notifications at all; the
+# messages it holds back arrive as one summary when the window ends. Set the
+# same window here and on the home machine — each daemon decides on its own,
+# and the mutual guards alert from both sides.
+# [quiet_time]
+# from = "23:00"
+# to = "07:00"

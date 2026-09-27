@@ -134,6 +134,41 @@ The simplest possible check — just an exit code:
 
 State (active alert, escalation index, counters, **last run time**) is persisted per check — at run start (for the schedule) and again after every run (for the alert state). A daemon restart does not re-alert for already-known failures, and does **not** re-run every check: a check runs after restart only if its period has already elapsed since the last run (edited periods apply from the last run moment); otherwise it keeps its schedule.
 
+## Quiet hours
+
+`[quiet_time]` sets a daily window — local wall-clock time — during which nothing is sent:
+
+```toml
+[quiet_time]
+from = "23:00"   # window start, inclusive
+to   = "07:00"   # window end, exclusive
+```
+
+Checks keep running and state keeps updating while the window is open; only the delivery waits. The window may sit inside one day (`02:00` → `09:00`) or cross midnight (`23:00` → `07:00`) — the direction is inferred from `from`/`to`, there is no separate switch. `from == to` is a config error: it would mean either a zero-length window or all-day silence, so remove the section to disable quiet hours instead.
+
+What happens to the messages that come up while the window is open:
+
+- **Nothing is sent at the time.** A check whose first alert, or whose repeat alert, lands inside the window is parked instead.
+- **When the window closes, one summary arrives** listing those checks, each with its own `(down for …)` line, exactly like a repeat alert:
+
+  ```
+  🌙 quiet hours 23:00→07:00 over — 2 alerts
+
+  🔴 web: check failed (exit=1)
+  connection refused
+  (down for 7h 12m)
+
+  🔴 db: check failed (exit=1)
+  no space left on device
+  (down for 2h 40m)
+  ```
+
+- **A failure and its recovery both inside the window report nothing at all** — the incident is over before you ever heard of it, so there is nothing to close.
+- **An alert that went out before the window and recovered inside it** is reported when the window ends (`🟢 web: restored after 6h`), so the morning does not leave it looking down.
+- The parked message lives in the check state, so a daemon restart during the window still delivers it at the end. The escalation schedule counts from the delivery, not from the moment the alert was due — `repeat` intervals are measured from the morning summary.
+
+The summary is one message; if it does not fit into Telegram's limit it is split at check boundaries with the header repeated. Set the same window in every config that alerts to the same chat (home and VPS) — each daemon decides on its own.
+
 ## Parser details
 
 Metadata is any line matching `#\s+(\w+): (.*)`. Known keys are consumed, unknown keys are ignored, so other tooling can keep its own `# key: value` headers in the same files. Checks must be executable (`chmod +x`); hidden files, `*.tmp` and editor backups (`*~`) are skipped.

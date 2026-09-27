@@ -9,6 +9,7 @@
 - `src/main.rs` — запуск, inotify-watcher (notify), главный select-цикл
 - `src/config.rs` — TOML-конфиг (`checks_dir`, `state_dir`, `libexec_dir`, `[telegram]`, `[defaults]`)
 - `src/metadata.rs` — парсер `# key: value` + парсер длительностей (`30s/5m/1h/1h30m/2d`)
+- `src/quiet.rs` — окно тишины `[quiet_time]`: локальное время суток (через `libc::localtime_r`), окно внутри суток или через полночь
 - `src/check.rs` — загруженная проверка (id = имя файла, `version` для инвалидации записей планировщика)
 - `src/state.rs` — стейт: JSON-файл на проверку в `state_dir` (атомарная запись tmp+rename)
 - `src/runner.rs` — запуск через `#!` в собственном process group (setsid), killpg по таймауту
@@ -23,6 +24,7 @@
 - Таймаут убивает всю process group проверки (ssh, curl и т.д.), а не только сам скрипт.
 - Дефолты: `period=5m`, `timeout=60s`; recheck по умолчанию = period проверки (override per-check `# recheck:`); `report_restored` по умолчанию true.
 - Пока алерт активен: перепроверка раз в `recheck`, повторы алерта по расписанию `repeat` от момента последнего алерта.
+- `[quiet_time]` (`from`/`to`, локальное время; `from > to` = окно через полночь, `from == to` = ошибка конфига, чтобы опечатка не будила ночью): проверки и стейт работают как обычно, задерживается только отправка. Удержанное паркуется в стейте (`deferred_alert` + `deferred_alert_repeat`, `deferred_restored`; все с `serde(default)` для старых JSON) и уходит в конце окна **одной** сводкой — строка на проверку, у каждой свой свежий `(down for X)` как у повторов. `repeat_index`/`last_alert_at`/`alert_count` двигаются только при фактической доставке (в сводке), не в момент срабатывания. Сбой+restore целиком внутри окна = тишина; alert до окна + restore внутри = `deferred_restored`, тоже уходит в конце. Парковка переживает рестарт, конец окна ловится секундным тиком (`check_quiet_window`), поэтому рестарт уже после окна флашит сразу. Сводка > лимита Telegram режется по границам проверок с повтором заголовка.
 - `# name:` в шапке проверки — display name в алертах (failed/repeat/restored) вместо id файла; в логах остаётся id. Придумано чтобы клиенты ТГ не линковали имена вида `api-health.check.sh`.
 - Hot-reload НЕ запускает проверку: расписание всегда `last_run_at + period` (период может быть новым). Немедленный запуск — только если после правки период уже истёк, или проверка никогда не запускалась.
 - `notify::Watcher` trait должен быть в scope для `.watch()` — без него события молча не приходят.
@@ -59,7 +61,7 @@
 ## Проверка изменений
 
 - `cargo build` — 0 warnings
-- `cargo test` — 4 теста мета-парсера и durations
+- `cargo test` — мета-парсер и durations, окно тишины (границы суток), дебаунс hot-reload, стейт после прогона, удержание алертов тишиной
 - парсеры: пайпы в `libexec/*` тестируются напрямую, см. примеры в их docstrings
 - smoke: `mkdir -p tmp/checks tmp/state`, конфиг в `tmp/config.toml` (см. tmp/), `RUST_LOG=info timeout 5 cargo run -q -- tmp/config.toml`; hot-reload проверяется созданием/удалением файла в `tmp/checks` на работающем демоне
 

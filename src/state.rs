@@ -22,6 +22,19 @@ pub struct CheckState {
     /// (first failure of the incident); cleared on recovery
     #[serde(default)]
     pub failing_since: Option<i64>,
+    /// message the quiet hours held back (first alert or repeat); it goes out
+    /// with the summary when the window ends
+    #[serde(default)]
+    pub deferred_alert: Option<String>,
+    /// the held-back message is a repeat, not the first alert: the escalation
+    /// step advances when it is finally delivered, and a held-back repeat
+    /// means the incident itself was already announced
+    #[serde(default)]
+    pub deferred_alert_repeat: bool,
+    /// restore message for an alert that went out *before* the quiet hours;
+    /// a failure and its recovery both inside the window report nothing
+    #[serde(default)]
+    pub deferred_restored: Option<String>,
     /// unix epoch seconds of the last run start; on startup a check runs
     /// immediately only if period has already elapsed since this
     #[serde(default)]
@@ -37,6 +50,9 @@ impl Default for CheckState {
             alert_count: 0,
             last_alert_at: None,
             failing_since: None,
+            deferred_alert: None,
+            deferred_alert_repeat: false,
+            deferred_restored: None,
             last_run_at: None,
         }
     }
@@ -100,5 +116,34 @@ impl StateStore {
         if let Err(e) = write() {
             tracing::warn!("cannot save state for {id}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// state files written before the quiet-hours fields existed must still
+    /// load: these are exactly the files the running daemon already has on disk
+    #[test]
+    fn loads_state_files_without_the_quiet_hours_fields() {
+        let root = std::env::temp_dir().join(format!("insomnia-compat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = StateStore::new(root.clone());
+        std::fs::write(
+            root.join("old.check.sh.json"),
+            r#"{"alert_active":true,"pending_flake":false,"repeat_index":0,"alert_count":1,
+                "last_alert_at":100,"failing_since":50,"last_run_at":200}"#,
+        )
+        .unwrap();
+
+        let states = store.load_all().unwrap();
+        let state = states.get("old.check.sh").expect("old state file loads");
+        assert!(state.alert_active);
+        assert!(state.failing_since.is_some());
+        assert!(state.deferred_alert.is_none());
+        assert!(!state.deferred_alert_repeat);
+        assert!(state.deferred_restored.is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

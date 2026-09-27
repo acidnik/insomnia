@@ -2,6 +2,7 @@ mod check;
 mod config;
 mod engine;
 mod metadata;
+mod quiet;
 mod runner;
 mod state;
 mod telegram;
@@ -77,7 +78,10 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
-            _ = ticker.tick() => engine.run_due(),
+            _ = ticker.tick() => {
+                engine.check_quiet_window();
+                engine.run_due();
+            },
             ev = rx.recv() => match ev {
                 Some(Event::Fs(action)) => engine.handle_fs(action),
                 Some(Event::FsRecheck { path, token }) => engine.handle_recheck(&path, token),

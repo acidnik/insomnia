@@ -13,3 +13,12 @@ chat_id = "123456789"
 [defaults]
 period = "5m"     # default # period for checks without one
 timeout = "60s"   # default # timeout
+
+# Quiet hours: a daily local-time window with no notifications at all. Checks
+# keep running, only the delivery waits — what the window holds back goes out
+# as one summary when it ends, one line per check with its own "(down for X)".
+# from > to crosses midnight, from < to stays inside one day, from == to is a
+# config error (delete the section to disable quiet hours).
+# [quiet_time]
+# from = "23:00"
+# to = "07:00"

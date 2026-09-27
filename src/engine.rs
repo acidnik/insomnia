@@ -9,6 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::check::{Check, Checks};
 use crate::config::Config;
 use crate::metadata::{parse_duration, Meta};
+use crate::quiet::{self, QuietWindow};
 use crate::runner::{run_check, RunOutcome};
 use crate::state::{StateStore, States};
 use crate::telegram::TelegramClient;
@@ -60,6 +61,11 @@ pub struct Engine {
     pending_reloads: HashMap<String, u64>,
     default_period: Duration,
     default_timeout: Duration,
+    /// daily window with no notifications at all: checks keep running and
+    /// updating state, only the delivery waits (see quiet.rs)
+    quiet: Option<QuietWindow>,
+    /// last seen state of that window, for the start/end log lines
+    in_quiet: bool,
     gen_counter: u64,
     reload_token: u64,
 }
@@ -73,6 +79,15 @@ impl Engine {
                 None
             }
         };
+        // a malformed window is fatal, not a warning: a typo here would
+        // silently wake the user up all night
+        let quiet = QuietWindow::parse(cfg.quiet_time.as_ref())?;
+        if let Some(q) = &quiet {
+            tracing::info!("quiet hours: {} local time", q.label());
+        }
+        let in_quiet = quiet
+            .map(|q| q.active_at(quiet::local_minute()))
+            .unwrap_or(false);
         Ok(Engine {
             checks: Checks::new(),
             states: States::new(),
@@ -100,6 +115,8 @@ impl Engine {
                 .map(parse_duration)
                 .transpose()?
                 .unwrap_or(Duration::from_secs(60)),
+            quiet,
+            in_quiet,
             gen_counter: 0,
             reload_token: 0,
         })
@@ -419,6 +436,8 @@ impl Engine {
             tail(&outcome.stderr, 300),
         );
         let meta = check.meta.clone();
+        // decided before the state borrow starts
+        let quiet = self.quiet_now();
         let state = self.states.entry(id.to_string()).or_default();
         let now = Instant::now();
 
@@ -438,13 +457,28 @@ impl Engine {
                 state.alert_active = false;
                 state.repeat_index = 0;
                 tracing::info!("check recovered: {id}");
-                if meta.report_restored {
+                // a first alert the quiet hours never delivered: the incident
+                // is over before the user heard of it, so say nothing at all.
+                // A held-back *repeat* means the alert itself did go out
+                // earlier — that incident gets its restore in the morning.
+                let unannounced = state.deferred_alert.is_some() && !state.deferred_alert_repeat;
+                state.deferred_alert = None;
+                state.deferred_alert_repeat = false;
+                if meta.report_restored && !unannounced {
                     let name = meta.name.as_deref().unwrap_or(id);
                     let after = match downtime {
                         Some(d) => format!(" after {}", fmt_human(d)),
                         None => String::new(),
                     };
-                    self.send_notify(id, format!("🟢 {name}: restored{after}"));
+                    let text = format!("🟢 {name}: restored{after}");
+                    if quiet {
+                        // the alert went out before the quiet hours: closing
+                        // the incident in the morning beats leaving it looking
+                        // like it is still down
+                        state.deferred_restored = Some(text);
+                    } else {
+                        self.send_notify(id, text);
+                    }
                 }
             }
             next = period_dur;
@@ -470,14 +504,23 @@ impl Engine {
                 if !state.alert_active {
                     state.alert_active = true;
                     state.repeat_index = 0;
-                    state.alert_count += 1;
-                    state.last_alert_at = Some(epoch_now());
                     tracing::warn!(
                         "check failed: {id} (code={:?} timed_out={})",
                         outcome.code,
                         outcome.timed_out
                     );
-                    self.send_notify(id, format_alert(id, &meta, &outcome));
+                    let body = format_alert(id, &meta, &outcome);
+                    if quiet {
+                        // held back until the window ends; counted and
+                        // escalated when it is actually delivered
+                        tracing::debug!("quiet hours: holding back alert for {id}");
+                        state.deferred_alert = Some(body);
+                        state.deferred_alert_repeat = false;
+                    } else {
+                        state.alert_count += 1;
+                        state.last_alert_at = Some(epoch_now());
+                        self.send_notify(id, body);
+                    }
                     // while alerting, re-check every `recheck` (default = the check's period)
                     next = duration_of(&meta.recheck, period_dur);
                 } else {
@@ -488,15 +531,28 @@ impl Engine {
                         .map(|s| parse_duration(s))
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap_or_default();
-                    if let Some(need) = schedule
+                    let need = schedule
                         .get(state.repeat_index.min(schedule.len().saturating_sub(1)))
-                        .copied()
-                    {
-                        let since = state
-                            .last_alert_at
-                            .map(|t| epoch_now() - t)
-                            .unwrap_or(i64::MAX);
-                        if since >= need.as_secs() as i64 {
+                        .copied();
+                    let since = state
+                        .last_alert_at
+                        .map(|t| epoch_now() - t)
+                        .unwrap_or(i64::MAX);
+                    let due = need.is_some_and(|n| since >= n.as_secs() as i64);
+                    if due {
+                        if quiet {
+                            // a repeat that comes due overnight is not dropped,
+                            // it waits here and goes out with the summary. The
+                            // held-back first alert keeps its body (that is when
+                            // the incident started), a held-back repeat is
+                            // refreshed with the newest reason.
+                            if state.deferred_alert.is_none() {
+                                state.deferred_alert = Some(format_alert(id, &meta, &outcome));
+                                state.deferred_alert_repeat = true;
+                            } else if state.deferred_alert_repeat {
+                                state.deferred_alert = Some(format_alert(id, &meta, &outcome));
+                            }
+                        } else {
                             state.repeat_index += 1;
                             state.alert_count += 1;
                             state.last_alert_at = Some(epoch_now());
@@ -519,6 +575,100 @@ impl Engine {
         if let Some(state) = self.states.get(id) {
             self.store.save(id, state);
         }
+    }
+
+    /// is it quiet right now? (checks keep running either way — only the
+    /// delivery waits)
+    fn quiet_now(&self) -> bool {
+        self.quiet
+            .map(|q| q.active_at(quiet::local_minute()))
+            .unwrap_or(false)
+    }
+
+    /// once a second: notice the window edges and, while it is closed, deliver
+    /// whatever the quiet hours held back. Running the flush outside the window
+    /// also covers a restart that outlived the window end with messages still
+    /// parked on disk.
+    pub fn check_quiet_window(&mut self) {
+        let Some(q) = self.quiet else { return };
+        let now_quiet = q.active_at(quiet::local_minute());
+        if now_quiet != self.in_quiet {
+            self.in_quiet = now_quiet;
+            if now_quiet {
+                tracing::info!("quiet hours started ({} local time)", q.label());
+            } else {
+                tracing::info!("quiet hours over ({} local time)", q.label());
+            }
+        }
+        if !now_quiet {
+            self.flush_deferred();
+        }
+    }
+
+    /// deliver everything the quiet hours held back as one summary. Each alert
+    /// repeats the escalation bookkeeping its own send would have done, so the
+    /// schedule counts from the delivery and not from the moment it was due.
+    fn flush_deferred(&mut self) {
+        let mut alerts: Vec<(String, Duration)> = Vec::new();
+        let mut restored = Vec::new();
+        let mut touched = Vec::new();
+        for (id, state) in self.states.iter_mut() {
+            if let Some(text) = state.deferred_restored.take() {
+                restored.push(text);
+            }
+            let Some(body) = state.deferred_alert.take() else {
+                continue;
+            };
+            let down = Duration::from_secs(
+                state
+                    .failing_since
+                    .map(|s| (epoch_now() - s).max(0) as u64)
+                    .unwrap_or(0),
+            );
+            alerts.push((body, down));
+            state.alert_count += 1;
+            state.last_alert_at = Some(epoch_now());
+            if state.deferred_alert_repeat {
+                state.repeat_index += 1;
+            }
+            state.deferred_alert_repeat = false;
+            touched.push(id.clone());
+        }
+        if alerts.is_empty() && restored.is_empty() {
+            return;
+        }
+        let msgs = summary_messages(
+            &self.quiet.map(|q| q.label()).unwrap_or_default(),
+            &alerts,
+            &restored,
+        );
+        self.send_summary(msgs);
+        // the delivery is what the escalation schedule counts from, so persist
+        // it. Deliberately after the send: a crash in between costs a repeated
+        // summary, the opposite order would lose an alert.
+        for id in touched {
+            if let Some(state) = self.states.get(&id) {
+                self.store.save(&id, state);
+            }
+        }
+    }
+
+    /// one summary, split into several messages only when one would not fit
+    fn send_summary(&mut self, msgs: Vec<String>) {
+        let Some(tg) = self.tg.clone() else {
+            for msg in &msgs {
+                tracing::info!("[notify] {msg}");
+            }
+            return;
+        };
+        tracing::info!("quiet hours over, sending {} summary message(s)", msgs.len());
+        tokio::spawn(async move {
+            for msg in msgs {
+                if let Err(e) = tg.send(&msg).await {
+                    tracing::error!("telegram send failed: {e}");
+                }
+            }
+        });
     }
 
     fn send_notify(&mut self, id: &str, text: String) {
@@ -652,11 +802,61 @@ fn format_alert(id: &str, meta: &Meta, outcome: &RunOutcome) -> String {
 /// repeat alerts say how long the service has been down: `(down for 2h 30m)`;
 /// appended on its own line so custom `# message:` templates stay untouched
 fn format_repeat_alert(id: &str, meta: &Meta, outcome: &RunOutcome, down: Duration) -> String {
-    format!(
-        "{}\n(down for {})",
-        format_alert(id, meta, outcome),
-        fmt_human(down)
-    )
+    summary_entry(&format_alert(id, meta, outcome), down)
+}
+
+/// the downtime suffix, shared by repeat alerts and quiet-hours summary
+/// entries: the summary groups checks, so each one brings its own line — and
+/// with it its own `(down for …)`
+fn summary_entry(body: &str, down: Duration) -> String {
+    format!("{body}\n(down for {})", fmt_human(down))
+}
+
+/// the quiet-hours summary: one block per check, each with its own fresh
+/// downtime, alerts first (they need action) and the restores that close older
+/// incidents after them
+fn summary_messages(label: &str, alerts: &[(String, Duration)], restored: &[String]) -> Vec<String> {
+    let mut counts = Vec::new();
+    if !alerts.is_empty() {
+        counts.push(format!(
+            "{} alert{}",
+            alerts.len(),
+            if alerts.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if !restored.is_empty() {
+        counts.push(format!("{} restored", restored.len()));
+    }
+    let header = format!("🌙 quiet hours {label} over — {}", counts.join(", "));
+    let blocks: Vec<String> = alerts
+        .iter()
+        .map(|(body, down)| summary_entry(body, *down))
+        .chain(restored.iter().cloned())
+        .collect();
+    pack_messages(&header, &blocks)
+}
+
+/// Telegram rejects messages over 4096 characters and the client truncates at
+/// 3900; a summary that does not fit is split at check boundaries with the
+/// header repeated, so nothing is dropped silently
+const SUMMARY_CHARS: usize = 3700;
+
+fn pack_messages(header: &str, blocks: &[String]) -> Vec<String> {
+    let mut msgs = Vec::new();
+    let mut cur = header.to_string();
+    for block in blocks {
+        let fits = cur.chars().count() + block.chars().count() + 2 <= SUMMARY_CHARS;
+        if !fits && cur.chars().count() > header.chars().count() {
+            msgs.push(std::mem::take(&mut cur));
+            cur = header.to_string();
+        }
+        // the header opens every message, so every block — including the first
+        // one — needs the blank line before it
+        cur.push_str("\n\n");
+        cur.push_str(block);
+    }
+    msgs.push(cur);
+    msgs
 }
 
 #[cfg(test)]
@@ -692,6 +892,63 @@ mod tests {
         );
     }
 
+    /// the morning summary groups several checks, so every entry carries its
+    /// own downtime line — the same suffix a repeat alert has
+    #[test]
+    fn every_summary_entry_carries_its_own_downtime() {
+        assert_eq!(
+            summary_entry("🔴 web: check failed (exit=1)", Duration::from_secs(2700)),
+            "🔴 web: check failed (exit=1)\n(down for 45m)"
+        );
+        assert_eq!(
+            summary_entry("🔴 db: check failed (exit=1)", Duration::from_secs(300)),
+            "🔴 db: check failed (exit=1)\n(down for 5m)"
+        );
+    }
+
+    #[test]
+    fn long_summaries_split_at_check_boundaries() {
+        let header = "🌙 quiet hours 23:00→07:00 over — 2 alerts";
+        let blocks = vec!["a".repeat(2000), "b".repeat(2000)];
+        let msgs = pack_messages(header, &blocks);
+        assert_eq!(msgs.len(), 2);
+        for msg in &msgs {
+            assert!(
+                msg.starts_with(&format!("{header}\n\n")),
+                "every message opens with the header and a blank line"
+            );
+            assert!(msg.chars().count() <= SUMMARY_CHARS);
+        }
+        assert!(msgs[0].ends_with('a'));
+        assert!(msgs[1].ends_with('b'));
+    }
+
+    /// the summary groups the held-back checks: one block each, each with its
+    /// own downtime, alerts before restores, header counting both
+    #[test]
+    fn summary_groups_a_line_per_check() {
+        let alerts = vec![
+            (
+                "🔴 web: check failed (exit=1)".to_string(),
+                Duration::from_secs(2700),
+            ),
+            (
+                "🔴 db: check failed (exit=1)".to_string(),
+                Duration::from_secs(300),
+            ),
+        ];
+        let restored = vec!["🟢 api: restored after 5h".to_string()];
+        let msgs = summary_messages("23:00→07:00", &alerts, &restored);
+        assert_eq!(msgs.len(), 1, "short entries still fit one message");
+        assert_eq!(
+            msgs[0],
+            "🌙 quiet hours 23:00→07:00 over — 2 alerts, 1 restored\n\n\
+             🔴 web: check failed (exit=1)\n(down for 45m)\n\n\
+             🔴 db: check failed (exit=1)\n(down for 5m)\n\n\
+             🟢 api: restored after 5h"
+        );
+    }
+
     /// an editor save is a burst of fs events: the check must be re-read once,
     /// after the burst has been quiet for the debounce window
     #[tokio::test]
@@ -715,6 +972,7 @@ mod tests {
             state_dir: Some(root.join("state")),
             libexec_dir: None,
             telegram: None,
+            quiet_time: None,
             defaults: crate::config::Defaults::default(),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -774,6 +1032,7 @@ mod tests {
             state_dir: Some(state_dir.clone()),
             libexec_dir: None,
             telegram: None,
+            quiet_time: None,
             defaults: crate::config::Defaults::default(),
         };
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -814,5 +1073,307 @@ mod tests {
         assert_eq!(fmt_human(Duration::from_secs(3725)), "1h 2m 5s");
         assert_eq!(fmt_human(Duration::from_secs(90000)), "1d 1h");
         assert_eq!(fmt_human(Duration::from_millis(240)), "0s");
+    }
+
+    /// `HH:MM` for a minute of the day
+    fn clock(minute: u32) -> String {
+        format!("{:02}:{:02}", minute / 60 % 24, minute % 60)
+    }
+
+    /// a quiet window given as offsets in minutes from the local time now
+    fn quiet_window_config(from_offset: i64, to_offset: i64) -> crate::config::QuietTimeConfig {
+        let now = crate::quiet::local_minute() as i64;
+        let at = |offset: i64| clock((now + offset).rem_euclid(1440) as u32);
+        crate::config::QuietTimeConfig {
+            from: at(from_offset),
+            to: at(to_offset),
+        }
+    }
+
+    /// open now: opened a minute ago, closes in an hour (crossing midnight is
+    /// fine, the direction is inferred from from/to)
+    fn quiet_now_config() -> crate::config::QuietTimeConfig {
+        quiet_window_config(-1, 60)
+    }
+
+    /// closed now: opens in a minute
+    fn quiet_later_config() -> crate::config::QuietTimeConfig {
+        quiet_window_config(1, 2)
+    }
+
+    /// engine with one executable check; `quiet` adds a window open right now
+    fn engine_with_check(name: &str, quiet: bool) -> (Engine, String, PathBuf) {
+        use tokio::sync::mpsc;
+
+        let root = std::env::temp_dir().join(format!("insomnia-{name}-{}", std::process::id()));
+        let checks_dir = root.join("checks");
+        std::fs::create_dir_all(&checks_dir).unwrap();
+        let id = "quiet.check.sh".to_string();
+        let path = checks_dir.join(&id);
+        std::fs::write(
+            &path,
+            "#!/usr/bin/env bash\n# period: 1h\n# repeat: 1m\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cfg = Config {
+            checks_dir: checks_dir.clone(),
+            state_dir: Some(root.join("state")),
+            libexec_dir: None,
+            telegram: None,
+            quiet_time: quiet.then(quiet_now_config),
+            defaults: crate::config::Defaults::default(),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(&cfg, tx).unwrap();
+        engine.scan_dir(&checks_dir);
+        (engine, id, root)
+    }
+
+    /// run the check once and report the outcome as if it had just finished
+    fn finish(engine: &mut Engine, id: &str, outcome: RunOutcome) {
+        engine.spawn_run(id);
+        let gen = engine.checks.get(id).unwrap().running_gen.unwrap();
+        engine.handle_done(id, gen, outcome);
+    }
+
+    /// a failure inside the quiet hours is held back, survives a restart, and
+    /// goes out when the window ends
+    #[tokio::test]
+    async fn quiet_hours_hold_an_alert_until_the_window_ends() {
+        let (mut engine, id, root) = engine_with_check("quiet-alert", true);
+        finish(&mut engine, &id, failed());
+
+        let state = engine.states.get(&id).unwrap();
+        assert!(state.alert_active);
+        assert!(state.deferred_alert.is_some());
+        assert_eq!(state.alert_count, 0, "nothing has been sent yet");
+        assert!(
+            state.last_alert_at.is_none(),
+            "the escalation must not start before the delivery"
+        );
+
+        // parked on disk too, or a restart at 3am would lose the alert
+        let persisted = StateStore::new(root.join("state")).load_all().unwrap();
+        assert!(persisted.get(&id).unwrap().deferred_alert.is_some());
+
+        engine.flush_deferred();
+        let state = engine.states.get(&id).unwrap();
+        assert!(state.deferred_alert.is_none());
+        assert_eq!(state.alert_count, 1, "the summary counts as the delivery");
+        assert!(state.last_alert_at.is_some());
+        let persisted = StateStore::new(root.join("state")).load_all().unwrap();
+        assert!(persisted.get(&id).unwrap().deferred_alert.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// a failure and its recovery both inside the window: the user was never
+    /// told about the incident, so the morning brings nothing at all
+    #[tokio::test]
+    async fn quiet_hours_swallow_a_failure_that_recovers_inside_the_window() {
+        let (mut engine, id, root) = engine_with_check("quiet-recover", true);
+        finish(&mut engine, &id, failed());
+        assert!(engine.states.get(&id).unwrap().deferred_alert.is_some());
+
+        finish(&mut engine, &id, ok());
+        engine.flush_deferred();
+
+        let state = engine.states.get(&id).unwrap();
+        assert!(!state.alert_active);
+        assert!(state.deferred_alert.is_none());
+        assert!(state.deferred_restored.is_none(), "the alert never went out");
+        assert_eq!(state.alert_count, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// the alert went out before the window: its restore waits for the morning
+    /// instead of being swallowed along with the night's noise
+    #[tokio::test]
+    async fn quiet_hours_defer_the_restore_of_an_earlier_alert() {
+        let (mut engine, id, root) = engine_with_check("quiet-restored", false);
+        finish(&mut engine, &id, failed());
+        assert_eq!(engine.states.get(&id).unwrap().alert_count, 1, "sent right away");
+
+        // the window opens, then the check recovers
+        engine.quiet = QuietWindow::parse(Some(&quiet_now_config())).unwrap();
+        finish(&mut engine, &id, ok());
+        assert!(engine.states.get(&id).unwrap().deferred_restored.is_some());
+
+        engine.flush_deferred();
+        assert!(engine.states.get(&id).unwrap().deferred_restored.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// a repeat that comes due overnight is not lost either: it joins the
+    /// summary, and the escalation advances only on that delivery
+    #[tokio::test]
+    async fn quiet_hours_hold_a_repeat_and_escalate_on_delivery() {
+        let (mut engine, id, root) = engine_with_check("quiet-repeat", false);
+        finish(&mut engine, &id, failed());
+        assert_eq!(engine.states.get(&id).unwrap().alert_count, 1);
+
+        // pretend the alert went out long ago, so the repeat is due now
+        engine.states.get_mut(&id).unwrap().last_alert_at = Some(epoch_now() - 3600);
+        engine.quiet = QuietWindow::parse(Some(&quiet_now_config())).unwrap();
+        finish(&mut engine, &id, failed());
+
+        let state = engine.states.get(&id).unwrap();
+        assert!(state.deferred_alert.is_some(), "the repeat waits");
+        assert!(state.deferred_alert_repeat);
+        assert_eq!(state.repeat_index, 0, "the step advances on delivery only");
+
+        engine.flush_deferred();
+        let state = engine.states.get(&id).unwrap();
+        assert_eq!(state.repeat_index, 1);
+        assert_eq!(state.alert_count, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// the flush happens when the window closes, not on every tick: while it is
+    /// still open, a passing second must leave the parked messages parked
+    #[tokio::test]
+    async fn check_quiet_window_flushes_only_after_the_window() {
+        let (mut engine, id, root) = engine_with_check("quiet-edge", true);
+        finish(&mut engine, &id, failed());
+
+        engine.check_quiet_window();
+        assert!(engine.in_quiet);
+        assert!(
+            engine.states.get(&id).unwrap().deferred_alert.is_some(),
+            "still inside the window: nothing may go out"
+        );
+
+        // same parked state, but the window is over now
+        engine.quiet = QuietWindow::parse(Some(&quiet_later_config())).unwrap();
+        engine.check_quiet_window();
+        assert!(!engine.in_quiet, "the fresh engine sees the window closed");
+        let state = engine.states.get(&id).unwrap();
+        assert!(state.deferred_alert.is_none());
+        assert_eq!(state.alert_count, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// a restart inside the window loads the parked messages and does not
+    /// flush them early — without the state file the alert would be gone
+    #[tokio::test]
+    async fn a_restart_inside_the_window_keeps_the_parked_alert() {
+        use tokio::sync::mpsc;
+
+        let (mut engine, id, root) = engine_with_check("quiet-restart", true);
+        finish(&mut engine, &id, failed());
+        drop(engine);
+
+        let cfg = Config {
+            checks_dir: root.join("checks"),
+            state_dir: Some(root.join("state")),
+            libexec_dir: None,
+            telegram: None,
+            quiet_time: Some(quiet_now_config()),
+            defaults: crate::config::Defaults::default(),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut restarted = Engine::new(&cfg, tx).unwrap();
+        restarted.set_states(StateStore::new(root.join("state")).load_all().unwrap());
+        restarted.check_quiet_window();
+
+        let state = restarted.states.get(&id).unwrap();
+        assert!(state.deferred_alert.is_some(), "the parked alert survived");
+        assert_eq!(state.alert_count, 0, "and it is still undelivered");
+        assert!(restarted.in_quiet, "the new process knows it is quiet");
+        assert!(restarted.quiet_now());
+
+        // a daemon that was down across the window end delivers in the morning,
+        // on the very first tick
+        let closed = Config {
+            checks_dir: root.join("checks"),
+            state_dir: Some(root.join("state")),
+            libexec_dir: None,
+            telegram: None,
+            quiet_time: Some(quiet_later_config()),
+            defaults: crate::config::Defaults::default(),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut morning = Engine::new(&closed, tx).unwrap();
+        morning.set_states(StateStore::new(root.join("state")).load_all().unwrap());
+        morning.check_quiet_window();
+
+        let state = morning.states.get(&id).unwrap();
+        assert!(state.deferred_alert.is_none(), "delivered at the first tick");
+        assert_eq!(state.alert_count, 1);
+        let persisted = StateStore::new(root.join("state")).load_all().unwrap();
+        assert!(persisted.get(&id).unwrap().deferred_alert.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// a restore parked earlier in the window and a failure parked later both
+    /// go out in the same summary
+    #[tokio::test]
+    async fn quiet_hours_report_a_parked_restore_and_a_later_failure_together() {
+        let (mut engine, id, root) = engine_with_check("quiet-mixed", false);
+        finish(&mut engine, &id, failed()); // told about it before the window
+        engine.quiet = QuietWindow::parse(Some(&quiet_now_config())).unwrap();
+        finish(&mut engine, &id, ok()); // recovered inside the window
+        finish(&mut engine, &id, failed()); // and failed again inside it
+
+        let state = engine.states.get(&id).unwrap();
+        assert!(state.deferred_restored.is_some(), "the restore waits");
+        assert!(state.deferred_alert.is_some(), "the new failure waits too");
+
+        engine.flush_deferred();
+        let state = engine.states.get(&id).unwrap();
+        assert!(state.deferred_restored.is_none());
+        assert!(state.deferred_alert.is_none());
+        assert_eq!(state.alert_count, 2, "the bedtime alert and the summary");
+        assert_eq!(state.repeat_index, 0, "not a repeat: the escalation starts fresh");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// a held-back repeat is dropped when the check recovers, but the restore
+    /// still goes out: the incident itself was announced before the window, so
+    /// swallowing it would leave it looking down
+    #[tokio::test]
+    async fn quiet_hours_keep_the_restore_of_a_held_back_repeat() {
+        let (mut engine, id, root) = engine_with_check("quiet-repeat-restore", false);
+        finish(&mut engine, &id, failed()); // announced before the window
+        engine.states.get_mut(&id).unwrap().last_alert_at = Some(epoch_now() - 3600);
+
+        engine.quiet = QuietWindow::parse(Some(&quiet_now_config())).unwrap();
+        finish(&mut engine, &id, failed()); // the repeat is held back
+        assert!(engine.states.get(&id).unwrap().deferred_alert_repeat);
+
+        finish(&mut engine, &id, ok()); // and recovers inside the window
+        let state = engine.states.get(&id).unwrap();
+        assert!(!state.alert_active);
+        assert!(state.deferred_alert.is_none(), "the repeat is obsolete");
+        assert!(
+            state.deferred_restored.is_some(),
+            "the incident was announced, so it must be closed out"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `# report_restored: false` stays silent as usual, even when the alert
+    /// itself went out before the window
+    #[tokio::test]
+    async fn quiet_hours_respect_report_restored_false() {
+        let (mut engine, id, root) = engine_with_check("quiet-norestore", false);
+        engine.checks.get_mut(&id).unwrap().meta.report_restored = false;
+        finish(&mut engine, &id, failed());
+
+        engine.quiet = QuietWindow::parse(Some(&quiet_now_config())).unwrap();
+        finish(&mut engine, &id, ok());
+        engine.flush_deferred();
+
+        let state = engine.states.get(&id).unwrap();
+        assert!(!state.alert_active);
+        assert!(state.deferred_restored.is_none());
+        assert!(state.deferred_alert.is_none());
+        assert_eq!(state.alert_count, 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
