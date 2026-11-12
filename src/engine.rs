@@ -375,6 +375,17 @@ impl Engine {
             if check.running_gen.is_some() {
                 continue; // already running; its Done event reschedules
             }
+            // the file can disappear without a usable fs event: deleting a
+            // symlink's target leaves a dangling link behind, and a lost
+            // Remove event leaves the check loaded. Either way spawning it
+            // fails with ENOENT and alerts "spawn failed" on every recheck
+            // forever, so drop the check instead of running it
+            let path = check.path.clone();
+            if !path.is_file() {
+                tracing::info!("check file is gone, unloading: {id}");
+                self.remove(&path);
+                continue;
+            }
             self.spawn_run(&id);
         }
     }
@@ -1002,6 +1013,26 @@ mod tests {
             engine.checks.get("burst.check.sh").unwrap().version,
             2,
             "the burst must produce exactly one reload"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// a check file can vanish without a usable fs event (a deleted symlink
+    /// target leaves the link dangling, a lost Remove leaves the check
+    /// loaded): spawning it would alert "spawn failed" on every recheck
+    /// forever, so the scheduler drops the check instead
+    #[test]
+    fn a_vanished_check_file_is_unloaded_instead_of_alerting() {
+        let (mut engine, id, root) = engine_with_check("vanished", false);
+        std::fs::remove_file(root.join("checks").join(&id)).unwrap();
+        engine.run_due(); // a never-run check is due immediately
+        assert!(
+            engine.checks.get(&id).is_none(),
+            "the check must be unloaded, not run"
+        );
+        assert!(
+            !engine.states.get(&id).map(|s| s.alert_active).unwrap_or(false),
+            "an unrunnable check must not open an alert"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
